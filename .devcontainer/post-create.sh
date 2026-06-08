@@ -7,16 +7,13 @@ set -e
 echo "--- Running post-create script ---"
 sudo apt update -y
 sudo apt upgrade -y
-sudo apt install -y ripgrep vim
+sudo apt install -y ripgrep vim python3.13-venv python3-pip
 
 # Install anti-gravity
-curl -fsSL https://antigravity.google/cli/install.sh | bash
-
-# Create the ARC3-AGI directory if it doesn't exist
-if [ ! -d "arc3-agi" ]; then
-    mkdir arc3-agi
+if [ ! -f /home/vscode/.local/bin/agy ]; then
+    echo "Installing anti-gravity CLI..."
+    curl -fsSL https://antigravity.google/cli/install.sh | bash
 fi
-cd arc3-agi
 
 # Activating the virtual environment
 echo "Creating virtual environment..."

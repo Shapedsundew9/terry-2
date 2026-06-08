@@ -23,7 +23,7 @@ use std::path::Path;
 use std::time::Duration;
 
 const BASE_SIZE: usize = 64;
-const OUTPUT_PATH: &str = "arc3_agi/initial_frame.png";
+const OUTPUT_PATH: &str = "target/initial_frame.png";
 const QUANTIZATION_FACTORS: [usize; 4] = [2, 4, 8, 16];
 const PANEL_GAP_PX: u32 = 4;
 const DEFAULT_API_BASE_URL: &str = "http://127.0.0.1:8000";

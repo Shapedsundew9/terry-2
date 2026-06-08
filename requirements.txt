@@ -3,3 +3,5 @@ github-copilot-sdk
 pytest
 google-genai
 arc-agi
+fastapi
+uvicorn

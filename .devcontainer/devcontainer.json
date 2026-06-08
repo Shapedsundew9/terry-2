@@ -1,0 +1,65 @@
+// For format details, see https://aka.ms/devcontainer.json. For config options, see the
+// README at: https://github.com/devcontainers/templates/tree/main/src/rust
+{
+    "name": "rust-2",
+    // Or use a Dockerfile or Docker Compose file. More info: https://containers.dev/guide/dockerfile
+    "dockerComposeFile": "docker-compose.yml",
+    "service": "app",
+    "workspaceFolder": "/workspaces/rust-2",
+    "postCreateCommand": "bash .devcontainer/post-create.sh",
+    "postStartCommand": "bash .devcontainer/post-start.sh",
+    "customizations": {
+        "vscode": {
+            "extensions": [
+                "GitHub.copilot",
+                "GitHub.copilot-chat",
+                "ms-vscode.vscode-speech",
+                "rust-lang.rust-analyzer",
+                "tamasfe.even-better-toml",
+                "vadimcn.vscode-lldb",
+                "eamodio.gitlens",
+                "GitHub.vscode-pull-request-github",
+                "github.vscode-github-actions",
+                "bierner.markdown-mermaid",
+                "DavidAnson.vscode-markdownlint",
+                "ms-python.python",
+                "ms-python.debugpy",
+                "ms-python.vscode-pylance"
+            ],
+            "settings": {
+                "editor.formatOnSave": true,
+                "[rust]": {
+                    "editor.defaultFormatter": "rust-lang.rust-analyzer"
+                },
+                "[json]": {
+                    "editor.formatOnSave": true,
+                    "editor.defaultFormatter": "vscode.json-language-features"
+                },
+                "[jsonc]": {
+                    "editor.formatOnSave": true,
+                    "editor.defaultFormatter": "vscode.json-language-features"
+                },
+                "[markdown]": {
+                    "editor.formatOnSave": true,
+                    "editor.formatOnPaste": true
+                },
+                "editor.codeActionsOnSave": {
+                    "source.organizeImports": "explicit",
+                    "source.fixAll.sortJSON": "explicit"
+                }
+            }
+        },
+        "remoteUser": "vscode",
+        "features": {
+            "ghcr.io/devcontainers/features/node:1": {},
+            "ghcr.io/devcontainers/features/github-cli:1": {
+                "version": "latest"
+            }
+        },
+        "containerEnv": {
+            "GITHUB_TOKEN": "${localEnv:COPILOT_GITHUB_TOKEN}",
+            // "GEMINI_API_KEY": "${localEnv:GEMINI_API_KEY}",
+            "GEMINI_API_KEY": "${localEnv:FREE_GEMINI_API_KEY}"
+        }
+    }
+}

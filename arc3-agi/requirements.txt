@@ -1,0 +1,5 @@
+neo4j
+github-copilot-sdk
+pytest
+google-genai
+arc-agi

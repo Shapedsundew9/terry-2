@@ -16,6 +16,8 @@
 // The frame is 64x64
 
 use image::{ImageBuffer, Rgba};
+use rand::rngs::StdRng;
+use rand::{Rng, SeedableRng};
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use std::env;
@@ -23,10 +25,14 @@ use std::path::Path;
 use std::time::Duration;
 
 const BASE_SIZE: usize = 64;
-const OUTPUT_PATH: &str = "target/initial_frame.png";
+const OUTPUT_PATH: &str = "target/frame_sequence.png";
 const QUANTIZATION_FACTORS: [usize; 4] = [2, 4, 8, 16];
 const PANEL_GAP_PX: u32 = 4;
+const FRAME_ROW_GAP_PX: u32 = 8;
 const DEFAULT_API_BASE_URL: &str = "http://127.0.0.1:8000";
+const DEFAULT_ACTION_SEED: u64 = 42;
+const REQUEST_COUNT: usize = 10;
+const RANDOM_ACTIONS: [&str; 4] = ["ACTION1", "ACTION2", "ACTION3", "ACTION4"];
 
 const PALETTE: [[u8; 4]; 16] = [
     [0xFF, 0xFF, 0xFF, 0xFF], // 0: White
@@ -196,79 +202,159 @@ fn validate_frame_shape(frame: &[Vec<u8>], source: &str) {
     }
 }
 
-fn load_initial_frame_from_api(base_url: &str) -> Vec<Vec<u8>> {
+fn load_action_seed() -> u64 {
+    match env::var("ARC3_ACTION_SEED") {
+        Ok(raw) => raw.parse::<u64>().unwrap_or_else(|error| {
+            panic!("Failed to parse ARC3_ACTION_SEED='{}' as u64: {error}", raw)
+        }),
+        Err(_) => DEFAULT_ACTION_SEED,
+    }
+}
+
+fn request_frame_for_action(
+    client: &Client,
+    endpoint: &str,
+    action: &str,
+    request_index: usize,
+) -> Vec<Vec<u8>> {
+    let response = client
+        .post(endpoint)
+        .json(&ActionRequest { action })
+        .send()
+        .unwrap_or_else(|error| {
+            panic!(
+                "Failed to request frame {} from {} with action {}: {error}",
+                request_index + 1,
+                endpoint,
+                action
+            )
+        });
+
+    let response = response.error_for_status().unwrap_or_else(|error| {
+        panic!(
+            "Frame request {} failed for {} with action {}: {error}",
+            request_index + 1,
+            endpoint,
+            action
+        )
+    });
+
+    let payload: ActionResponse = response.json().unwrap_or_else(|error| {
+        panic!(
+            "Failed to parse JSON for frame request {} from {}: {error}",
+            request_index + 1,
+            endpoint
+        )
+    });
+
+    if payload.state.is_empty() {
+        panic!(
+            "Frame request {} from {} had empty state",
+            request_index + 1,
+            endpoint
+        );
+    }
+    let _step = payload.step;
+    let _reset_performed = payload.reset_performed;
+
+    let frame = extract_first_frame(payload.frame);
+    validate_frame_shape(
+        &frame,
+        &format!("REST API response.frame[0] request {}", request_index + 1),
+    );
+    frame
+}
+
+fn load_frame_sequence_from_api(
+    base_url: &str,
+    action_seed: u64,
+) -> (Vec<Vec<Vec<u8>>>, Vec<String>) {
     let endpoint = format!("{}/action", base_url.trim_end_matches('/'));
     let client = Client::builder()
         .timeout(Duration::from_secs(5))
         .build()
         .unwrap_or_else(|error| panic!("Failed to build HTTP client: {error}"));
 
-    let response = client
-        .post(&endpoint)
-        .json(&ActionRequest { action: "RESET" })
-        .send()
-        .unwrap_or_else(|error| {
-            panic!("Failed to request initial frame from {}: {error}", endpoint)
-        });
+    let mut rng = StdRng::seed_from_u64(action_seed);
+    let mut frames = Vec::with_capacity(REQUEST_COUNT);
+    let mut actions = Vec::with_capacity(REQUEST_COUNT);
 
-    let response = response
-        .error_for_status()
-        .unwrap_or_else(|error| panic!("Initial frame request failed for {}: {error}", endpoint));
+    for request_index in 0..REQUEST_COUNT {
+        let action = if request_index == 0 {
+            "RESET"
+        } else {
+            let idx = rng.random_range(0..RANDOM_ACTIONS.len());
+            RANDOM_ACTIONS[idx]
+        };
 
-    let payload: ActionResponse = response
-        .json()
-        .unwrap_or_else(|error| panic!("Failed to parse JSON response from {}: {error}", endpoint));
-
-    if payload.state.is_empty() {
-        panic!("Initial frame response from {} had empty state", endpoint);
+        actions.push(action.to_string());
+        frames.push(request_frame_for_action(
+            &client,
+            &endpoint,
+            action,
+            request_index,
+        ));
     }
-    let _step = payload.step;
-    let _reset_performed = payload.reset_performed;
 
-    let initial_frame = extract_first_frame(payload.frame);
-    validate_frame_shape(&initial_frame, "REST API response.frame[0]");
-    initial_frame
+    (frames, actions)
 }
 
-fn render_frame_panels(grids: &[Vec<Vec<u8>>]) {
-    // Render every resolution into one horizontal image, scaling each panel up to 64x64.
+fn render_frame_sequence(frame_grids: &[Vec<Vec<Vec<u8>>>]) {
+    // Render each frame as one row and each quantization level as one panel in that row.
 
-    if grids.is_empty() {
-        panic!("No grids provided for rendering");
+    if frame_grids.is_empty() {
+        panic!("No frame grids provided for rendering");
+    }
+    if frame_grids[0].is_empty() {
+        panic!("First frame has no quantization panels");
     }
 
     let panel_size = BASE_SIZE as u32;
-    let panel_count = grids.len() as u32;
+    let panel_count = frame_grids[0].len() as u32;
+    let frame_count = frame_grids.len() as u32;
     let output_width = panel_count * panel_size + (panel_count - 1) * PANEL_GAP_PX;
-    let output_height = panel_size;
+    let output_height = frame_count * panel_size + (frame_count - 1) * FRAME_ROW_GAP_PX;
     let mut image = ImageBuffer::<Rgba<u8>, Vec<u8>>::new(output_width, output_height);
 
-    for (panel_index, grid) in grids.iter().enumerate() {
-        let grid_size = grid.len();
-        if grid_size == 0 || grid.iter().any(|row| row.len() != grid_size) {
-            panic!("Grid at index {panel_index} is not square");
+    for (frame_index, grids) in frame_grids.iter().enumerate() {
+        if grids.len() as u32 != panel_count {
+            panic!(
+                "Frame {frame_index} has {} panels; expected {}",
+                grids.len(),
+                panel_count
+            );
         }
-        if BASE_SIZE % grid_size != 0 {
-            panic!("Grid at index {panel_index} has unsupported size {grid_size}");
-        }
 
-        let scale = (BASE_SIZE / grid_size) as u32;
-        let panel_offset_x = panel_index as u32 * (panel_size + PANEL_GAP_PX);
+        let frame_offset_y = frame_index as u32 * (panel_size + FRAME_ROW_GAP_PX);
+        for (panel_index, grid) in grids.iter().enumerate() {
+            let grid_size = grid.len();
+            if grid_size == 0 || grid.iter().any(|row| row.len() != grid_size) {
+                panic!("Grid at frame {frame_index}, panel {panel_index} is not square");
+            }
+            if BASE_SIZE % grid_size != 0 {
+                panic!(
+                    "Grid at frame {frame_index}, panel {panel_index} has unsupported size {grid_size}"
+                );
+            }
 
-        for (y, row) in grid.iter().enumerate() {
-            for (x, value) in row.iter().enumerate() {
-                let color = PALETTE.get(*value as usize).unwrap_or_else(|| {
-                    panic!(
-                        "Cell value {} at panel {}, ({}, {}) is out of palette range 0..=15",
-                        value, panel_index, x, y
-                    )
-                });
+            let scale = (BASE_SIZE / grid_size) as u32;
+            let panel_offset_x = panel_index as u32 * (panel_size + PANEL_GAP_PX);
 
-                let start_x = panel_offset_x + x as u32 * scale;
-                let start_y = y as u32 * scale;
-                for dy in 0..scale {
-                    for dx in 0..scale {
-                        image.put_pixel(start_x + dx, start_y + dy, Rgba(*color));
+            for (y, row) in grid.iter().enumerate() {
+                for (x, value) in row.iter().enumerate() {
+                    let color = PALETTE.get(*value as usize).unwrap_or_else(|| {
+                        panic!(
+                            "Cell value {} at frame {}, panel {}, ({}, {}) is out of palette range 0..=15",
+                            value, frame_index, panel_index, x, y
+                        )
+                    });
+
+                    let start_x = panel_offset_x + x as u32 * scale;
+                    let start_y = frame_offset_y + y as u32 * scale;
+                    for dy in 0..scale {
+                        for dx in 0..scale {
+                            image.put_pixel(start_x + dx, start_y + dy, Rgba(*color));
+                        }
                     }
                 }
             }
@@ -282,22 +368,26 @@ fn render_frame_panels(grids: &[Vec<Vec<u8>>]) {
 }
 
 fn main() {
-    // Load source data from REST API, derive quantized u8 grids on demand, and render all scales together.
+    // Request a sequence of frames from REST API, then render each frame as a row over all quantizations.
     let base_url = env::var("ARC3_API_URL").unwrap_or_else(|_| DEFAULT_API_BASE_URL.to_string());
-    let initial_frame = load_initial_frame_from_api(&base_url);
-    let frame = Frame64::new(initial_frame);
-    let grids = frame.grids_for_rendering();
+    let action_seed = load_action_seed();
+    let (frames, actions) = load_frame_sequence_from_api(&base_url, action_seed);
+    let frame_grids: Vec<Vec<Vec<Vec<u8>>>> = frames
+        .into_iter()
+        .map(|frame| Frame64::new(frame).grids_for_rendering())
+        .collect();
 
     println!(
-        "Loaded initial frame from {}: {}x{}",
+        "Loaded {} frames from {} using seed {}",
+        frame_grids.len(),
         base_url,
-        grids[0].len(),
-        grids[0][0].len()
+        action_seed
     );
+    println!("Action sequence: {}", actions.join(", "));
 
-    render_frame_panels(&grids);
+    render_frame_sequence(&frame_grids);
     println!(
-        "Rendered composite frame panels (64, 32, 16, 8, 4) to {}",
+        "Rendered frame sequence panels (64, 32, 16, 8, 4) to {}",
         OUTPUT_PATH
     );
 }

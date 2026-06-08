@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "arc3-agi"
+version = "0.1.0"
+description = "Placeholder framework package for arc3-agi"
+requires-python = ">=3.10"
+authors = [{ name = "arc3-agi" }]
+
+[project.scripts]
+arc3-agi = "arc3_agi.cli:main"
+
+[tool.setuptools]
+package-dir = { "" = "." }
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["arc3_agi*"]

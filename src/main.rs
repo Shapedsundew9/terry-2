@@ -26,6 +26,7 @@ use std::time::Duration;
 
 const BASE_SIZE: usize = 64;
 const OUTPUT_PATH: &str = "target/frame_sequence.png";
+const DELTA_OUTPUT_PATH: &str = "target/delta_sequence.png";
 const QUANTIZATION_FACTORS: [usize; 4] = [2, 4, 8, 16];
 const PANEL_GAP_PX: u32 = 4;
 const FRAME_ROW_GAP_PX: u32 = 8;
@@ -33,6 +34,7 @@ const DEFAULT_API_BASE_URL: &str = "http://127.0.0.1:8000";
 const DEFAULT_ACTION_SEED: u64 = 42;
 const REQUEST_COUNT: usize = 10;
 const RANDOM_ACTIONS: [&str; 4] = ["ACTION1", "ACTION2", "ACTION3", "ACTION4"];
+const MAX_PERCEPTUAL_DIST: f64 = 255.0;
 
 const PALETTE: [[u8; 4]; 16] = [
     [0xFF, 0xFF, 0xFF, 0xFF], // 0: White
@@ -89,6 +91,15 @@ fn color_distance(c1: u8, c2: u8) -> f64 {
     let dg = p1[1] as f64 - p2[1] as f64;
     let db = p1[2] as f64 - p2[2] as f64;
     (dr * dr + dg * dg + db * db).sqrt()
+}
+
+fn perceptual_color_distance(c1: u8, c2: u8) -> f64 {
+    let p1 = PALETTE[c1 as usize];
+    let p2 = PALETTE[c2 as usize];
+    let dr = p1[0] as f64 - p2[0] as f64;
+    let dg = p1[1] as f64 - p2[1] as f64;
+    let db = p1[2] as f64 - p2[2] as f64;
+    (0.299 * dr * dr + 0.587 * dg * dg + 0.114 * db * db).sqrt()
 }
 
 struct Frame64 {
@@ -186,6 +197,86 @@ impl Frame64 {
 
         for factor in QUANTIZATION_FACTORS {
             grids.push(self.quantized_grid(factor));
+        }
+
+        grids
+    }
+
+    fn change_delta_grid(&self, previous: &Frame64, factor: usize) -> Vec<Vec<f64>> {
+        if factor == 0 || BASE_SIZE % factor != 0 {
+            panic!("Quantization factor {factor} must evenly divide {BASE_SIZE}");
+        }
+
+        // 1. Identify global background color (the most frequent color in the 64x64 frame).
+        let mut global_counts = [0_u32; 16];
+        for row in &self.cells {
+            for &val in row {
+                if val < 16 {
+                    global_counts[val as usize] += 1;
+                }
+            }
+        }
+        let global_bg = global_counts
+            .iter()
+            .enumerate()
+            .max_by_key(|&(_, count)| count)
+            .map(|(val, _)| val as u8)
+            .unwrap_or(0);
+
+        // 2. Compute base change saliency map (64x64)
+        let mut base_saliency = vec![vec![0.0; BASE_SIZE]; BASE_SIZE];
+        let gamma = 4.0;
+
+        for y in 0..BASE_SIZE {
+            for x in 0..BASE_SIZE {
+                let c_prev = previous.cells[y][x];
+                let c_curr = self.cells[y][x];
+                let d_temp = perceptual_color_distance(c_prev, c_curr);
+
+                if d_temp > 0.0 {
+                    let d_bg_prev = perceptual_color_distance(c_prev, global_bg);
+                    let d_bg_curr = perceptual_color_distance(c_curr, global_bg);
+                    let max_bg_dist = d_bg_prev.max(d_bg_curr);
+
+                    let boost = 1.0 + gamma * (max_bg_dist / MAX_PERCEPTUAL_DIST);
+                    base_saliency[y][x] = d_temp * boost;
+                }
+            }
+        }
+
+        // 3. Aggregate base saliency map to target scale using p-norm (p=3)
+        let quantized_size = BASE_SIZE / factor;
+        let mut delta_grid = vec![vec![0.0; quantized_size]; quantized_size];
+        let p = 3.0;
+
+        for y in 0..quantized_size {
+            for x in 0..quantized_size {
+                let mut sum_power = 0.0;
+                for dy in 0..factor {
+                    for dx in 0..factor {
+                        let val = base_saliency[y * factor + dy][x * factor + dx];
+                        sum_power += val.powf(p);
+                    }
+                }
+
+                let count = (factor * factor) as f64;
+                let norm_val = (sum_power / count).powf(1.0 / p);
+
+                let max_possible_saliency = MAX_PERCEPTUAL_DIST * (1.0 + gamma);
+                delta_grid[y][x] = (norm_val / max_possible_saliency).min(1.0);
+            }
+        }
+
+        delta_grid
+    }
+
+    fn delta_grids_for_rendering(&self, previous: &Frame64) -> Vec<Vec<Vec<f64>>> {
+        let mut grids = Vec::with_capacity(1 + QUANTIZATION_FACTORS.len());
+        // Base resolution (factor 1)
+        grids.push(self.change_delta_grid(previous, 1));
+
+        for factor in QUANTIZATION_FACTORS {
+            grids.push(self.change_delta_grid(previous, factor));
         }
 
         grids
@@ -367,14 +458,96 @@ fn render_frame_sequence(frame_grids: &[Vec<Vec<Vec<u8>>>]) {
     });
 }
 
+fn zeroed_delta_grids() -> Vec<Vec<Vec<f64>>> {
+    let mut grids = Vec::with_capacity(1 + QUANTIZATION_FACTORS.len());
+    // Base resolution (factor 1)
+    grids.push(vec![vec![0.0; BASE_SIZE]; BASE_SIZE]);
+
+    // Quantized levels
+    for factor in QUANTIZATION_FACTORS {
+        let size = BASE_SIZE / factor;
+        grids.push(vec![vec![0.0; size]; size]);
+    }
+    grids
+}
+
+fn render_delta_sequence(delta_grids: &[Vec<Vec<Vec<f64>>>]) {
+    if delta_grids.is_empty() {
+        panic!("No delta grids provided for rendering");
+    }
+    if delta_grids[0].is_empty() {
+        panic!("First delta frame has no quantization panels");
+    }
+
+    let panel_size = BASE_SIZE as u32;
+    let panel_count = delta_grids[0].len() as u32;
+    let frame_count = delta_grids.len() as u32;
+    let output_width = panel_count * panel_size + (panel_count - 1) * PANEL_GAP_PX;
+    let output_height = frame_count * panel_size + (frame_count - 1) * FRAME_ROW_GAP_PX;
+    let mut image = ImageBuffer::<Rgba<u8>, Vec<u8>>::new(output_width, output_height);
+
+    for (frame_index, grids) in delta_grids.iter().enumerate() {
+        if grids.len() as u32 != panel_count {
+            panic!(
+                "Delta frame {frame_index} has {} panels; expected {}",
+                grids.len(),
+                panel_count
+            );
+        }
+
+        let frame_offset_y = frame_index as u32 * (panel_size + FRAME_ROW_GAP_PX);
+        for (panel_index, grid) in grids.iter().enumerate() {
+            let grid_size = grid.len();
+            if grid_size == 0 || grid.iter().any(|row| row.len() != grid_size) {
+                panic!("Delta grid at frame {frame_index}, panel {panel_index} is not square");
+            }
+            if BASE_SIZE % grid_size != 0 {
+                panic!(
+                    "Delta grid at frame {frame_index}, panel {panel_index} has unsupported size {grid_size}"
+                );
+            }
+
+            let scale = (BASE_SIZE / grid_size) as u32;
+            let panel_offset_x = panel_index as u32 * (panel_size + PANEL_GAP_PX);
+
+            for (y, row) in grid.iter().enumerate() {
+                for (x, &value) in row.iter().enumerate() {
+                    // Grayscale mapping: value is 0.0 to 1.0
+                    let intensity = (value * 255.0).round() as u8;
+                    let color = [intensity, intensity, intensity, 0xFF];
+
+                    let start_x = panel_offset_x + x as u32 * scale;
+                    let start_y = frame_offset_y + y as u32 * scale;
+                    for dy in 0..scale {
+                        for dx in 0..scale {
+                            image.put_pixel(start_x + dx, start_y + dy, Rgba(color));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let output_path = Path::new(DELTA_OUTPUT_PATH);
+    image.save(output_path).unwrap_or_else(|error| {
+        panic!("Failed to save {}: {error}", output_path.display());
+    });
+}
+
 fn main() {
     // Request a sequence of frames from REST API, then render each frame as a row over all quantizations.
     let base_url = env::var("ARC3_API_URL").unwrap_or_else(|_| DEFAULT_API_BASE_URL.to_string());
     let action_seed = load_action_seed();
-    let (frames, actions) = load_frame_sequence_from_api(&base_url, action_seed);
-    let frame_grids: Vec<Vec<Vec<Vec<u8>>>> = frames
+    let (raw_frames, actions) = load_frame_sequence_from_api(&base_url, action_seed);
+
+    let frames: Vec<Frame64> = raw_frames
         .into_iter()
-        .map(|frame| Frame64::new(frame).grids_for_rendering())
+        .map(Frame64::new)
+        .collect();
+
+    let frame_grids: Vec<Vec<Vec<Vec<u8>>>> = frames
+        .iter()
+        .map(|frame| frame.grids_for_rendering())
         .collect();
 
     println!(
@@ -389,5 +562,21 @@ fn main() {
     println!(
         "Rendered frame sequence panels (64, 32, 16, 8, 4) to {}",
         OUTPUT_PATH
+    );
+
+    // Compute consecutive deltas
+    let mut delta_grids: Vec<Vec<Vec<Vec<f64>>>> = Vec::with_capacity(frames.len());
+    for i in 0..frames.len() {
+        if i == 0 {
+            delta_grids.push(zeroed_delta_grids());
+        } else {
+            delta_grids.push(frames[i].delta_grids_for_rendering(&frames[i - 1]));
+        }
+    }
+
+    render_delta_sequence(&delta_grids);
+    println!(
+        "Rendered frame delta sequence panels (64, 32, 16, 8, 4) to {}",
+        DELTA_OUTPUT_PATH
     );
 }

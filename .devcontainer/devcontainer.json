@@ -48,20 +48,20 @@
                     "source.fixAll.sortJSON": "explicit"
                 }
             }
-        },
-        "remoteUser": "vscode",
-        "features": {
-            "ghcr.io/devcontainers/features/node:1": {},
-            "ghcr.io/devcontainers/features/github-cli:1": {
-                "version": "latest"
-            }
-        },
-        "containerEnv": {
-            "GITHUB_TOKEN": "${localEnv:COPILOT_GITHUB_TOKEN}",
-            // "GEMINI_API_KEY": "${localEnv:GEMINI_API_KEY}",
-            "GEMINI_API_KEY": "${localEnv:FREE_GEMINI_API_KEY}",
-            "ARC_AGI_API": "${localEnv:ARC_AGI_API}",
-            "ARC_API_KEY": "${localEnv:ARC_AGI_API}"
         }
+    },
+    "remoteUser": "vscode",
+    "features": {
+        "ghcr.io/devcontainers/features/node:1": {},
+        "ghcr.io/devcontainers/features/github-cli:1": {
+            "version": "latest"
+        }
+    },
+    "containerEnv": {
+        "GITHUB_TOKEN": "${localEnv:COPILOT_GITHUB_TOKEN}",
+        // "GEMINI_API_KEY": "${localEnv:GEMINI_API_KEY}",
+        "GEMINI_API_KEY": "${localEnv:FREE_GEMINI_API_KEY}",
+        "ARC_AGI_API": "${localEnv:ARC_AGI_API}",
+        "ARC_API_KEY": "${localEnv:ARC_AGI_API}"
     }
 }

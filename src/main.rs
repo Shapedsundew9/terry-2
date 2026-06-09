@@ -102,6 +102,12 @@ fn perceptual_color_distance(c1: u8, c2: u8) -> f64 {
     (0.299 * dr * dr + 0.587 * dg * dg + 0.114 * db * db).sqrt()
 }
 
+/// Map a normalised saliency value in [0.0, 1.0] to a 4-bit palette index in [0, 15].
+/// Uses uniform linear quantization: bin = round(value * 15), clamped to [0, 15].
+fn quantize_delta_value(value: f64) -> u8 {
+    (value * 15.0).round().clamp(0.0, 15.0) as u8
+}
+
 struct Frame64 {
     cells: Vec<Vec<u8>>,
 }
@@ -191,7 +197,7 @@ impl Frame64 {
         quantized
     }
 
-    fn grids_for_rendering(&self) -> Vec<Vec<Vec<u8>>> {
+    fn multiscale_grids_raw(&self) -> Vec<Vec<Vec<u8>>> {
         let mut grids = Vec::with_capacity(1 + QUANTIZATION_FACTORS.len());
         grids.push(self.base_grid());
 
@@ -202,7 +208,7 @@ impl Frame64 {
         grids
     }
 
-    fn change_delta_grid(&self, previous: &Frame64, factor: usize) -> Vec<Vec<f64>> {
+    fn change_delta_grid(&self, previous: &Frame64, factor: usize) -> Vec<Vec<u8>> {
         if factor == 0 || BASE_SIZE % factor != 0 {
             panic!("Quantization factor {factor} must evenly divide {BASE_SIZE}");
         }
@@ -245,8 +251,9 @@ impl Frame64 {
         }
 
         // 3. Aggregate base saliency map to target scale using p-norm (p=3)
+        //    and quantize the normalised value to 4 bits (0..=15) linearly.
         let quantized_size = BASE_SIZE / factor;
-        let mut delta_grid = vec![vec![0.0; quantized_size]; quantized_size];
+        let mut delta_grid = vec![vec![0_u8; quantized_size]; quantized_size];
         let p = 3.0;
 
         for y in 0..quantized_size {
@@ -263,14 +270,15 @@ impl Frame64 {
                 let norm_val = (sum_power / count).powf(1.0 / p);
 
                 let max_possible_saliency = MAX_PERCEPTUAL_DIST * (1.0 + gamma);
-                delta_grid[y][x] = (norm_val / max_possible_saliency).min(1.0);
+                let normalised = (norm_val / max_possible_saliency).min(1.0);
+                delta_grid[y][x] = quantize_delta_value(normalised);
             }
         }
 
         delta_grid
     }
 
-    fn delta_grids_for_rendering(&self, previous: &Frame64) -> Vec<Vec<Vec<f64>>> {
+    fn multiscale_delta_grids_raw(&self, previous: &Frame64) -> Vec<Vec<Vec<u8>>> {
         let mut grids = Vec::with_capacity(1 + QUANTIZATION_FACTORS.len());
         // Base resolution (factor 1)
         grids.push(self.change_delta_grid(previous, 1));
@@ -369,25 +377,62 @@ fn load_frame_sequence_from_api(
     let mut rng = StdRng::seed_from_u64(action_seed);
     let mut frames = Vec::with_capacity(REQUEST_COUNT);
     let mut actions = Vec::with_capacity(REQUEST_COUNT);
+    let mut frame_history = Vec::with_capacity(REQUEST_COUNT);
+    let mut quantized_history = Vec::with_capacity(REQUEST_COUNT);
+    let mut delta_history = Vec::with_capacity(REQUEST_COUNT);
 
+    let mut action = "RESET";
     for request_index in 0..REQUEST_COUNT {
-        let action = if request_index == 0 {
-            "RESET"
-        } else {
-            let idx = rng.random_range(0..RANDOM_ACTIONS.len());
-            RANDOM_ACTIONS[idx]
-        };
-
         actions.push(action.to_string());
-        frames.push(request_frame_for_action(
-            &client,
-            &endpoint,
-            action,
-            request_index,
-        ));
+        let frame = request_frame_for_action(&client, &endpoint, action, request_index);
+
+        // Check there is a non-empty frame before calling Terry for the next action.
+        if frame.is_empty() {
+            panic!(
+                "Received an empty frame for request {} from {}; cannot determine next action",
+                request_index + 1,
+                endpoint
+            );
+        } else {
+            let current_frame = Frame64::new(frame.clone());
+            let quantized_grids = current_frame.multiscale_grids_raw();
+            let delta_grids = if let Some(previous_frame) = frame_history.last() {
+                current_frame.multiscale_delta_grids_raw(previous_frame)
+            } else {
+                zeroed_delta_grids()
+            };
+
+            frame_history.push(current_frame);
+            quantized_history.push(quantized_grids);
+            delta_history.push(delta_grids);
+
+            action = terry(&quantized_history, &delta_history, &mut rng);
+        }
+
+        frames.push(frame);
     }
 
     (frames, actions)
+}
+
+fn terry(
+    _quantized_frames: &[Vec<Vec<Vec<u8>>>],
+    _delta_frames: &[Vec<Vec<Vec<u8>>>],
+    rng: &mut StdRng,
+) -> &'static str {
+    // Placeholder for the actual Terry logic that determines the next action using
+    // quantized frame history and delta frame history.
+    // For now, it just returns a random action from the predefined list.
+    let _qframe = _quantized_frames
+        .last()
+        .and_then(|frame| frame.last())
+        .unwrap_or_else(|| panic!("Terry was called with no quantized frames"));
+    let _dframe = _delta_frames
+        .last()
+        .and_then(|frame| frame.last())
+        .unwrap_or_else(|| panic!("Terry was called with no delta frames"));
+    let action_index = rng.random_range(0..RANDOM_ACTIONS.len());
+    RANDOM_ACTIONS[action_index]
 }
 
 fn render_frame_sequence(frame_grids: &[Vec<Vec<Vec<u8>>>]) {
@@ -458,20 +503,20 @@ fn render_frame_sequence(frame_grids: &[Vec<Vec<Vec<u8>>>]) {
     });
 }
 
-fn zeroed_delta_grids() -> Vec<Vec<Vec<f64>>> {
+fn zeroed_delta_grids() -> Vec<Vec<Vec<u8>>> {
     let mut grids = Vec::with_capacity(1 + QUANTIZATION_FACTORS.len());
     // Base resolution (factor 1)
-    grids.push(vec![vec![0.0; BASE_SIZE]; BASE_SIZE]);
+    grids.push(vec![vec![0_u8; BASE_SIZE]; BASE_SIZE]);
 
     // Quantized levels
     for factor in QUANTIZATION_FACTORS {
         let size = BASE_SIZE / factor;
-        grids.push(vec![vec![0.0; size]; size]);
+        grids.push(vec![vec![0_u8; size]; size]);
     }
     grids
 }
 
-fn render_delta_sequence(delta_grids: &[Vec<Vec<Vec<f64>>>]) {
+fn render_delta_sequence(delta_grids: &[Vec<Vec<Vec<u8>>>]) {
     if delta_grids.is_empty() {
         panic!("No delta grids provided for rendering");
     }
@@ -512,8 +557,10 @@ fn render_delta_sequence(delta_grids: &[Vec<Vec<Vec<f64>>>]) {
 
             for (y, row) in grid.iter().enumerate() {
                 for (x, &value) in row.iter().enumerate() {
-                    // Grayscale mapping: value is 0.0 to 1.0
-                    let intensity = (value * 255.0).round() as u8;
+                    // Grayscale mapping: quantized 4-bit index (0..=15) mapped linearly
+                    // back to full 8-bit intensity so the rendered image mirrors the
+                    // discrete state that is passed into terry().
+                    let intensity = ((value as u16 * 255) / 15) as u8;
                     let color = [intensity, intensity, intensity, 0xFF];
 
                     let start_x = panel_offset_x + x as u32 * scale;
@@ -540,14 +587,11 @@ fn main() {
     let action_seed = load_action_seed();
     let (raw_frames, actions) = load_frame_sequence_from_api(&base_url, action_seed);
 
-    let frames: Vec<Frame64> = raw_frames
-        .into_iter()
-        .map(Frame64::new)
-        .collect();
+    let frames: Vec<Frame64> = raw_frames.into_iter().map(Frame64::new).collect();
 
     let frame_grids: Vec<Vec<Vec<Vec<u8>>>> = frames
         .iter()
-        .map(|frame| frame.grids_for_rendering())
+        .map(|frame| frame.multiscale_grids_raw())
         .collect();
 
     println!(
@@ -565,12 +609,12 @@ fn main() {
     );
 
     // Compute consecutive deltas
-    let mut delta_grids: Vec<Vec<Vec<Vec<f64>>>> = Vec::with_capacity(frames.len());
+    let mut delta_grids: Vec<Vec<Vec<Vec<u8>>>> = Vec::with_capacity(frames.len());
     for i in 0..frames.len() {
         if i == 0 {
             delta_grids.push(zeroed_delta_grids());
         } else {
-            delta_grids.push(frames[i].delta_grids_for_rendering(&frames[i - 1]));
+            delta_grids.push(frames[i].multiscale_delta_grids_raw(&frames[i - 1]));
         }
     }
 

@@ -35,6 +35,8 @@ const DEFAULT_ACTION_SEED: u64 = 42;
 const REQUEST_COUNT: usize = 10;
 const RANDOM_ACTIONS: [&str; 4] = ["ACTION1", "ACTION2", "ACTION3", "ACTION4"];
 const MAX_PERCEPTUAL_DIST: f64 = 255.0;
+const LAYER_COUNT: usize = 16;
+const NEIGHBORHOOD_SIZE: usize = 3;
 
 const PALETTE: [[u8; 4]; 16] = [
     [0xFF, 0xFF, 0xFF, 0xFF], // 0: White
@@ -415,24 +417,99 @@ fn load_frame_sequence_from_api(
     (frames, actions)
 }
 
+fn wrapped_offset(index: usize, delta: isize, size: usize) -> usize {
+    ((index as isize + delta).rem_euclid(size as isize)) as usize
+}
+
+fn encode_wrapped_neighborhood(
+    layer: &[Vec<u8>],
+    x: usize,
+    y: usize,
+    neighborhood_size: usize,
+) -> u128 {
+    if neighborhood_size <= 2 || neighborhood_size % 2 == 0 {
+        panic!("Neighborhood size must be an odd number greater than 2");
+    }
+
+    let height = layer.len();
+    if height == 0 || layer.iter().any(|row| row.len() != layer[0].len()) {
+        panic!("Layer must be non-empty and rectangular");
+    }
+
+    let bit_count = neighborhood_size * neighborhood_size;
+    if bit_count > 128 {
+        panic!("Neighborhood {neighborhood_size}x{neighborhood_size} exceeds u128 capacity");
+    }
+
+    let width = layer[0].len();
+    let radius = (neighborhood_size / 2) as isize;
+    let mut pattern = 0_u128;
+
+    // Traverse from top-left to bottom-right so the first sampled bit becomes the MSb
+    // and the final sampled bit becomes the LSb.
+    for dy in -radius..=radius {
+        for dx in -radius..=radius {
+            let sample_x = wrapped_offset(x, dx, width);
+            let sample_y = wrapped_offset(y, dy, height);
+            let bit = (layer[sample_y][sample_x] != 0) as u128;
+            pattern = (pattern << 1) | bit;
+        }
+    }
+
+    pattern
+}
+
 fn terry(
-    _quantized_frames: &[Vec<Vec<Vec<u8>>>],
-    _delta_frames: &[Vec<Vec<Vec<u8>>>],
+    quantized_frames: &[Vec<Vec<Vec<u8>>>],
+    delta_frames: &[Vec<Vec<Vec<u8>>>],
     rng: &mut StdRng,
 ) -> &'static str {
-    // Placeholder for the actual Terry logic that determines the next action using
-    // quantized frame history and delta frame history.
-    // For now, it just returns a random action from the predefined list.
-    let _qframe = _quantized_frames
+    let qframe = quantized_frames
         .last()
-        .and_then(|frame| frame.last())
+        .and_then(|frame| frame.first())
         .unwrap_or_else(|| panic!("Terry was called with no quantized frames"));
-    let _dframe = _delta_frames
+    let dframe = delta_frames
         .last()
-        .and_then(|frame| frame.last())
+        .and_then(|frame| frame.first())
         .unwrap_or_else(|| panic!("Terry was called with no delta frames"));
-    let action_index = rng.random_range(0..RANDOM_ACTIONS.len());
-    RANDOM_ACTIONS[action_index]
+
+    // qframe byte values are categorical indices (0..=15) that are mapped to
+    // 16x 64x64 1-bits 'layers'. At each 1-bit x,y coordinate the local environment
+    // is characterized by an nxn region where n is an odd number >2 centred on x,y.
+    // The pattern of the bit environments can be encoded as a unsigned integer where the
+    // MSb is the top-left of the region and the LSb is the bottom-right. This integer
+    // can be used in a look up table to map to some other state or action.
+    // NOTE: qframe wraps at the edges of the frame, so the region around (0,0)
+    // includes cells from the right and bottom edges.
+
+    if qframe.len() != BASE_SIZE || qframe.iter().any(|row| row.len() != BASE_SIZE) {
+        panic!(
+            "Expected base qframe to be {}x{}, got {}x{}",
+            BASE_SIZE,
+            BASE_SIZE,
+            qframe.len(),
+            qframe.first().map_or(0, |row| row.len())
+        );
+    }
+
+    let mut qbits = vec![vec![vec![0_u8; BASE_SIZE]; BASE_SIZE]; LAYER_COUNT];
+    for (y, row) in qframe.iter().enumerate() {
+        for (x, &value) in row.iter().enumerate() {
+            qbits[value as usize][y][x] = 1;
+        }
+    }
+    let _qneighbours = encode_wrapped_neighborhood(&qbits[0], 0, 0, NEIGHBORHOOD_SIZE);
+
+    let mut dbits = vec![vec![vec![0_u8; BASE_SIZE]; BASE_SIZE]; LAYER_COUNT];
+    for (y, row) in dframe.iter().enumerate() {
+        for (x, &value) in row.iter().enumerate() {
+            dbits[value as usize][y][x] = 1;
+        }
+    }
+
+    let _dneighbours = encode_wrapped_neighborhood(&dbits[0], 0, 0, NEIGHBORHOOD_SIZE);
+
+    RANDOM_ACTIONS[rng.random_range(0..RANDOM_ACTIONS.len())]
 }
 
 fn render_frame_sequence(frame_grids: &[Vec<Vec<Vec<u8>>>]) {

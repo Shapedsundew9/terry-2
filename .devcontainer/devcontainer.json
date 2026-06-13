@@ -24,7 +24,9 @@
                 "DavidAnson.vscode-markdownlint",
                 "ms-python.python",
                 "ms-python.debugpy",
-                "ms-python.vscode-pylance"
+                "ms-python.black-formatter",
+                "ms-python.vscode-pylance",
+                "ms-python.isort"
             ],
             "settings": {
                 "editor.formatOnSave": true,
@@ -46,22 +48,44 @@
                 "editor.codeActionsOnSave": {
                     "source.organizeImports": "explicit",
                     "source.fixAll.sortJSON": "explicit"
-                }
+                },
+                "python.formatting.provider": "black",
+                "python.linting.pylintEnabled": true,
+                "python.linting.enabled": true,
+                "python.defaultInterpreterPath": "${containerWorkspaceFolder}/.venv/bin/python",
+                "python.terminal.activateEnvironment": true,
+                "python.analysis.autoImportCompletions": true,
+                "python.analysis.indexing": true,
+                "python.analysis.autoSearchPaths": true,
+                "python.analysis.useImportHeuristic": true,
+                "[python]": {
+                    "editor.defaultFormatter": "ms-python.black-formatter",
+                    "editor.formatOnSave": true,
+                    "editor.codeActionsOnSave": {
+                        "source.organizeImports": "explicit"
+                    }
+                },
+                "isort.args": [
+                    "--profile",
+                    "black"
+                ],
+                "python.testing.pytestEnabled": true,
+                "python.testing.unittestEnabled": false
             }
+        },
+        "remoteUser": "vscode",
+        "features": {
+            "ghcr.io/devcontainers/features/node:1": {},
+            "ghcr.io/devcontainers/features/github-cli:1": {
+                "version": "latest"
+            }
+        },
+        "containerEnv": {
+            "GITHUB_TOKEN": "${localEnv:COPILOT_GITHUB_TOKEN}",
+            // "GEMINI_API_KEY": "${localEnv:GEMINI_API_KEY}",
+            "GEMINI_API_KEY": "${localEnv:FREE_GEMINI_API_KEY}",
+            "ARC_AGI_API": "${localEnv:ARC_AGI_API}",
+            "ARC_API_KEY": "${localEnv:ARC_AGI_API}"
         }
-    },
-    "remoteUser": "vscode",
-    "features": {
-        "ghcr.io/devcontainers/features/node:1": {},
-        "ghcr.io/devcontainers/features/github-cli:1": {
-            "version": "latest"
-        }
-    },
-    "containerEnv": {
-        "GITHUB_TOKEN": "${localEnv:COPILOT_GITHUB_TOKEN}",
-        // "GEMINI_API_KEY": "${localEnv:GEMINI_API_KEY}",
-        "GEMINI_API_KEY": "${localEnv:FREE_GEMINI_API_KEY}",
-        "ARC_AGI_API": "${localEnv:ARC_AGI_API}",
-        "ARC_API_KEY": "${localEnv:ARC_AGI_API}"
     }
 }

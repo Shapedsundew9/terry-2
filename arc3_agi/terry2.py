@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from enum import IntEnum
 from functools import lru_cache
-from random import randrange
+from random import getrandbits, randrange
 from typing import Generic, TypeVar
 
 from numpy import (
@@ -282,14 +282,67 @@ class GeneticCode2DGrid(
 ):
     """Represents the genetic code for the automaton in a 2D grid environment."""
 
-    def __init__(self, isize: int, ssize: int, asize: int) -> None:
+    def __init__(self) -> None:
         """Initialize the genetic code."""
-        super().__init__()
-        # The genetic code is represented as a 2D array of uint8 values where the
-        # first dimension corresponds to the input and the second dimension
-        # corresponds to the state. The value at each position is the action to
-        # take for that input and state.
-        self.code = zeros((2**isize, 2**ssize), dtype=uint8)
+        # Input + internal state --> new internal state. This is the core of the
+        # genetic code and defines the behavior of the automaton.
+        # smap key bits:
+        #    0-8: Internal state bits (9 bits)
+        #    9-26: Input bits (9 bits for walls + 9 bits for goals)
+        self.smap: dict[uint32, uint16] = {}
+        # Internal state --> action. This is the 'output layer' of the genetic code
+        self.amap: dict[uint16, uint8] = {}
+
+        # Initial Gene Definitions
+        self.genes: list[set[uint8]] = [
+            {uint8(g) for g in range(18, 27)},  # Gene 0: Maps to wall layer inputs
+            {uint8(g) for g in range(9, 18)},  # Gene 1: Maps to goal layer inputs
+            {uint8(g) for g in range(9)},  # Gene 2: Maps to internal state bits
+        ]
+
+    def get_state(self, input: uint32, state: uint16) -> uint16:
+        """Get the next internal state based on the input and current state."""
+        key = (input << self.ssize) | state
+        if key not in self.smap:
+            # If the key is not in the map, we can generate a new random state for it.
+            # This allows for a potentially infinite state landscape without needing to
+            # precompute or store every possible input-state combination.
+            # TODO: We could consider more sophisticated approaches to generating new
+            # states for unseen input-state combinations, for example based on the
+            # Hamming distance to existing keys or some other heuristic.
+            self.smap[key] = uint16(getrandbits(2**self.ssize))
+        return self.smap[key]
+
+    def get_action(self, state: uint16) -> uint8:
+        """Get the action based on the internal state."""
+        if state not in self.amap:
+            # If the state is not in the map, we can generate a new random action for it.
+            # This allows for a potentially infinite state landscape without needing to
+            # precompute or store every possible state-action combination.
+            # TODO: We could consider more sophisticated approaches to generating new
+            # states for unseen input-state combinations, for example based on the
+            # Hamming distance to existing keys or some other heuristic.
+            self.amap[state] = uint8(randrange(self.asize))
+        return self.amap[state]
+
+    def crossover(self, other: GeneticCode2DGrid) -> GeneticCode2DGrid:
+        """Perform crossover with another genetic code to produce a new genetic code."""
+        child = GeneticCode2DGrid()
+        # Crossover the smap by randomly choosing entries from either parent
+        for key in set(self.smap.keys()).union(other.smap.keys()):
+            child.smap[key] = (
+                self.smap[key]
+                if key in self.smap and randrange(2) == 0
+                else other.smap[key]
+            )
+        # Crossover the amap by randomly choosing entries from either parent
+        for key in set(self.amap.keys()).union(other.amap.keys()):
+            child.amap[key] = (
+                self.amap[key]
+                if key in self.amap and randrange(2) == 0
+                else other.amap[key]
+            )
+        return child
 
 
 class Automaton(
@@ -340,8 +393,6 @@ class Automaton(
     def tick(self) -> None:
         """Perform a tick of the automaton."""
         # Get the local environment correctly oriented for each layer
-        # TODO: Maybe instead of all this indexing and bitshifting on every tick we
-        # make orientation part of the automaton  could maintain a "local view" of the environment
         orientation_indices = self.orientation_indices[self.orientation.value]
         wrap_mask = self.environment.wrap_mask
         orientation_indices[0] = (orientation_indices[0] + self.y) & wrap_mask

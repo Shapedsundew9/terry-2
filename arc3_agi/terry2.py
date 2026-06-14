@@ -12,7 +12,9 @@ from numpy import (
     dot,
     empty,
     int8,
+    int16,
     int32,
+    int64,
     repeat,
     tile,
     uint8,
@@ -29,6 +31,18 @@ UINT8_ZERO = uint8(0)
 UINT8_ONE = uint8(1)
 UINT16_ZERO = uint16(0)
 UINT16_ONE = uint16(1)
+UINT32_ZERO = uint32(0)
+UINT32_ONE = uint32(1)
+UINT64_ZERO = uint64(0)
+UINT64_ONE = uint64(1)
+INT8_ZERO = int8(0)
+INT8_ONE = int8(1)
+INT16_ZERO = int16(0)
+INT16_ONE = int16(1)
+INT32_ZERO = int32(0)
+INT32_ONE = int32(1)
+INT64_ZERO = int64(0)
+INT64_ONE = int64(1)
 
 # Types
 I = TypeVar("I", unsignedinteger, bytes)  # Input type
@@ -143,7 +157,9 @@ class Automaton2DGrid(
         cls, radius: int, environment: Environment2DGrid, **kwargs
     ) -> None:
         """Initialize the subclass with the given parameters."""
-        super().__init_subclass__(**kwargs)
+        super().__init_subclass__(
+            isize=cls.isize, ssize=cls.ssize, asize=cls.asize, **kwargs
+        )
         cls.radius = radius
         cls.environment = environment
         cls.orientation_indices = cls._generate_orientation_indices()
@@ -310,7 +326,7 @@ class GeneticCode2DGrid(
             # TODO: We could consider more sophisticated approaches to generating new
             # states for unseen input-state combinations, for example based on the
             # Hamming distance to existing keys or some other heuristic.
-            self.smap[key] = uint16(getrandbits(2**self.ssize))
+            self.smap[key] = uint16(getrandbits(self.ssize))
         return self.smap[key]
 
     def get_action(self, state: uint16) -> uint8:
@@ -330,18 +346,24 @@ class GeneticCode2DGrid(
         child = GeneticCode2DGrid()
         # Crossover the smap by randomly choosing entries from either parent
         for key in set(self.smap.keys()).union(other.smap.keys()):
-            child.smap[key] = (
-                self.smap[key]
-                if key in self.smap and randrange(2) == 0
-                else other.smap[key]
-            )
+            if key not in self.smap:
+                child.smap[key] = other.smap[key]
+            elif key not in other.smap:
+                child.smap[key] = self.smap[key]
+            else:
+                child.smap[key] = (
+                    self.smap[key] if randrange(2) == 0 else other.smap[key]
+                )
         # Crossover the amap by randomly choosing entries from either parent
         for key in set(self.amap.keys()).union(other.amap.keys()):
-            child.amap[key] = (
-                self.amap[key]
-                if key in self.amap and randrange(2) == 0
-                else other.amap[key]
-            )
+            if key not in self.amap:
+                child.amap[key] = other.amap[key]
+            elif key not in other.amap:
+                child.amap[key] = self.amap[key]
+            else:
+                child.amap[key] = (
+                    self.amap[key] if randrange(2) == 0 else other.amap[key]
+                )
         return child
 
 

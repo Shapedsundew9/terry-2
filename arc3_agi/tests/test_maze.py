@@ -7,13 +7,8 @@ from unittest.mock import MagicMock
 import numpy as np
 import pytest
 
-# terry2 fails to fully initialise in test context (missing arcengine deps);
-# mock the submodule so generate_maze (which has no terry2 dependency) can import.
-_mock = MagicMock()
-_mock.Environment2DGrid = object  # plain base class so maze() class body is valid
-sys.modules.setdefault("arc3_agi.terry2", _mock)
-
 from arc3_agi.maze import generate_maze  # noqa: E402
+from arc3_agi.terry2 import Environment2DGrid, GeneticCode2DGrid
 
 
 def flood_fill_free(wall: np.ndarray) -> int:

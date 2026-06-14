@@ -8,7 +8,8 @@ from typing import Optional, Tuple
 from numpy import argwhere, int32, ones, uint8, uint16, zeros
 from numpy.random import default_rng
 from numpy.typing import NDArray
-from terry2 import (
+
+from arc3_agi.terry2 import (
     INT32_ZERO,
     UINT16_ZERO,
     Automaton,

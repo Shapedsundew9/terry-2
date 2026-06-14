@@ -5,6 +5,7 @@ from __future__ import annotations
 from random import getrandbits, randrange
 from typing import Optional, Tuple
 
+import pygame
 from numpy import argwhere, int32, ones, uint8, uint16, zeros
 from numpy.random import default_rng
 from numpy.typing import NDArray
@@ -134,6 +135,91 @@ class Maze(Environment2DGrid):
         self.free_cells = argwhere(wall == 0)
 
 
+class MazeRenderer:
+    """Simple pygame renderer for the Maze environment."""
+
+    _COLOR_WALL = (255, 255, 255)
+    _COLOR_FREE = (0, 0, 0)
+    _COLOR_GOAL = (255, 215, 0)
+    _COLOR_AUTOMATON = (0, 255, 255)
+    _COLOR_TRIANGLE = (0, 80, 180)
+
+    def __init__(self, maze: Maze, cell_size: int = 8) -> None:
+        self.maze = maze
+        self.cell_size = cell_size
+        self.width = maze.width * cell_size
+        self.height = maze.height * cell_size
+        pygame.init()
+        self.screen = pygame.display.set_mode((self.width, self.height))
+        pygame.display.set_caption("Maze Viewer")
+        self._bg = self._build_background()
+
+    def _build_background(self) -> pygame.Surface:
+        surface = pygame.Surface((self.width, self.height))
+        wall_layer = self.maze.ilayers[self.maze.LKEYS.WALL]
+        goal_layer = self.maze.ilayers[self.maze.LKEYS.GOAL]
+        cs = self.cell_size
+        for row in range(self.maze.height):
+            for col in range(self.maze.width):
+                px, py = col * cs, row * cs
+                if goal_layer[row, col] == 1:
+                    color = self._COLOR_GOAL
+                elif wall_layer[row, col] == 1:
+                    color = self._COLOR_WALL
+                else:
+                    color = self._COLOR_FREE
+                surface.fill(color, (px, py, cs, cs))
+        return surface
+
+    def _draw_automaton(
+        self, surface: pygame.Surface, automaton: "MazeAutomaton"
+    ) -> None:
+        cs = self.cell_size
+        col, row = int(automaton.x), int(automaton.y)
+        px, py = col * cs, row * cs
+        # Fill cell with automaton color
+        surface.fill(self._COLOR_AUTOMATON, (px, py, cs, cs))
+        # Draw direction triangle
+        half = cs // 2
+        margin = max(1, cs // 6)
+        orientation = automaton.orientation
+        if orientation == automaton.Orientation.UP:
+            pts = [
+                (px + half, py + margin),
+                (px + margin, py + cs - margin),
+                (px + cs - margin, py + cs - margin),
+            ]
+        elif orientation == automaton.Orientation.DOWN:
+            pts = [
+                (px + half, py + cs - margin),
+                (px + margin, py + margin),
+                (px + cs - margin, py + margin),
+            ]
+        elif orientation == automaton.Orientation.LEFT:
+            pts = [
+                (px + margin, py + half),
+                (px + cs - margin, py + margin),
+                (px + cs - margin, py + cs - margin),
+            ]
+        else:  # RIGHT
+            pts = [
+                (px + cs - margin, py + half),
+                (px + margin, py + margin),
+                (px + margin, py + cs - margin),
+            ]
+        pygame.draw.polygon(surface, self._COLOR_TRIANGLE, pts)
+
+    def render(self, automata: list) -> None:
+        surface = self._bg.copy()
+        for automaton in automata:
+            self._draw_automaton(surface, automaton)
+        self.screen.blit(surface, (0, 0))
+        pygame.display.flip()
+
+    def close(self) -> None:
+        pygame.quit()
+
+
 class MazeAutomaton(Automaton, radius=1, environment=Maze()):
     """Automaton that can navigate a maze environment."""
 
@@ -219,11 +305,46 @@ class Population:
 
 
 if __name__ == "__main__":
+    FPS = 10
+    TICKS_PER_EVOLVE = 100
+
     population = Population(size=100)
     rng = default_rng(42)
     maze = population.maze
     assert isinstance(maze, Maze)
-    for i in population.automata:
-        i.x, i.y = maze.free_cells[int(rng.integers(0, len(maze.free_cells)))]
-    population.tick()
-    population.evolve()
+    for automaton in population.automata:
+        automaton.x, automaton.y = maze.free_cells[
+            int(rng.integers(0, len(maze.free_cells)))
+        ]
+
+    renderer = MazeRenderer(maze)
+    clock = pygame.time.Clock()
+    tick_count = 0
+    running = True
+    try:
+        while running:
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    running = False
+                elif event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
+                    running = False
+
+            if not running:
+                break
+
+            population.tick()
+            tick_count += 1
+
+            if tick_count % TICKS_PER_EVOLVE == 0:
+                population.evolve()
+                # Reposition the newly-created offspring (bottom half) to random free cells
+                half = len(population.automata) // 2
+                for automaton in population.automata[half:]:
+                    automaton.x, automaton.y = maze.free_cells[
+                        int(rng.integers(0, len(maze.free_cells)))
+                    ]
+
+            renderer.render(population.automata)
+            clock.tick(FPS)
+    finally:
+        renderer.close()

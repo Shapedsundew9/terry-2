@@ -45,10 +45,10 @@ INT64_ZERO = int64(0)
 INT64_ONE = int64(1)
 
 # Types
-I = TypeVar("I", unsignedinteger, bytes)  # Input type
-S = TypeVar("S", unsignedinteger, NDArray[uint64])  # State type
-A = TypeVar("A", unsignedinteger, bytes)  # Action type
-G = TypeVar("G", unsignedinteger, bytes)  # Genetic map hash type
+I = TypeVar("I", int, bytes)  # Input type
+S = TypeVar("S", int, NDArray[uint64])  # State type
+A = TypeVar("A", int, bytes)  # Action type
+G = TypeVar("G", int, bytes)  # Genetic map hash type
 
 
 class GeneticCode(Generic[I, S, A]):
@@ -133,7 +133,7 @@ class AutomatonBase(Generic[I, S, A]):
 
 
 class Automaton2DGrid(
-    AutomatonBase[uint32, uint16, uint8],
+    AutomatonBase[int, int, int],
     isize=9 * 2,
     ssize=9,
     asize=3,
@@ -293,9 +293,7 @@ class Environment2DGrid(Environment2D):
             self.ilayers[key] = layer
 
 
-class GeneticCode2DGrid(
-    GeneticCode[uint32, uint16, uint8], isize=9 * 2, ssize=9, asize=3
-):
+class GeneticCode2DGrid(GeneticCode[int, int, int], isize=9 * 2, ssize=9, asize=3):
     """Represents the genetic code for the automaton in a 2D grid environment."""
 
     def __init__(self) -> None:
@@ -305,20 +303,20 @@ class GeneticCode2DGrid(
         # smap key bits:
         #    0-8: Internal state bits (9 bits)
         #    9-26: Input bits (9 bits for walls + 9 bits for goals)
-        self.smap: dict[uint32, uint16] = {}
+        self.smap: dict[int, int] = {}
         # Internal state --> action. This is the 'output layer' of the genetic code
-        self.amap: dict[uint16, uint8] = {}
+        self.amap: dict[int, int] = {}
 
         # Initial Gene Definitions
-        self.genes: list[set[uint8]] = [
-            {uint8(g) for g in range(18, 27)},  # Gene 0: Maps to wall layer inputs
-            {uint8(g) for g in range(9, 18)},  # Gene 1: Maps to goal layer inputs
-            {uint8(g) for g in range(9)},  # Gene 2: Maps to internal state bits
+        self.genes: list[set[int]] = [
+            {g for g in range(18, 27)},  # Gene 0: Maps to wall layer inputs
+            {g for g in range(9, 18)},  # Gene 1: Maps to goal layer inputs
+            {g for g in range(9)},  # Gene 2: Maps to internal state bits
         ]
 
-    def get_state(self, input: uint32, state: uint16) -> uint16:
+    def get_state(self, input, state) -> int:
         """Get the next internal state based on the input and current state."""
-        key = (input << self.ssize) | state
+        key = (int(input) << self.ssize) | int(state)
         if key not in self.smap:
             # If the key is not in the map, we can generate a new random state for it.
             # This allows for a potentially infinite state landscape without needing to
@@ -326,20 +324,21 @@ class GeneticCode2DGrid(
             # TODO: We could consider more sophisticated approaches to generating new
             # states for unseen input-state combinations, for example based on the
             # Hamming distance to existing keys or some other heuristic.
-            self.smap[key] = uint16(getrandbits(self.ssize))
+            self.smap[key] = getrandbits(self.ssize)
         return self.smap[key]
 
-    def get_action(self, state: uint16) -> uint8:
+    def get_action(self, state) -> int:
         """Get the action based on the internal state."""
-        if state not in self.amap:
+        key = int(state)
+        if key not in self.amap:
             # If the state is not in the map, we can generate a new random action for it.
             # This allows for a potentially infinite state landscape without needing to
             # precompute or store every possible state-action combination.
             # TODO: We could consider more sophisticated approaches to generating new
             # states for unseen input-state combinations, for example based on the
             # Hamming distance to existing keys or some other heuristic.
-            self.amap[state] = uint8(randrange(self.asize))
-        return self.amap[state]
+            self.amap[key] = randrange(self.asize)
+        return self.amap[key]
 
     def crossover(self, other: GeneticCode2DGrid) -> GeneticCode2DGrid:
         """Perform crossover with another genetic code to produce a new genetic code."""
@@ -375,9 +374,9 @@ class Automaton(
     def __init__(
         self,
         genetic_code: GeneticCode2DGrid,
-        state: uint16,
-        x: int32,
-        y: int32,
+        state: int,
+        x: int,
+        y: int,
         orientation: Automaton.Orientation,
     ) -> None:
         """Initialize the automaton."""
@@ -400,31 +399,32 @@ class Automaton(
             case self.Orientation.LEFT:
                 self.x = (self.x - 1) & self.environment.wrap_mask
 
-    def take_action(self, action: uint8) -> None:
+    def take_action(self, action) -> None:
         """Perform the given action."""
-        match self.AutomatonAction(action):
-            case self.AutomatonAction.MOVE_FORWARD:
-                self.move_forward()
-            case self.AutomatonAction.TURN_LEFT:
-                self.turn_left()
-            case self.AutomatonAction.TURN_RIGHT:
-                self.turn_right()
-            case _:
-                raise ValueError(f"Invalid action: {action}")
+        a = int(action)
+        if a == 0:
+            self.move_forward()
+        elif a == 1:
+            self.turn_left()
+        else:
+            self.turn_right()
 
     def tick(self) -> None:
         """Perform a tick of the automaton."""
-        # Get the local environment correctly oriented for each layer
-        orientation_indices = self.orientation_indices[self.orientation.value]
-        wrap_mask = self.environment.wrap_mask
-        orientation_indices[0] = (orientation_indices[0] + self.y) & wrap_mask
-        orientation_indices[1] = (orientation_indices[1] + self.x) & wrap_mask
-        local_walls = self.wall_layer[orientation_indices[0], orientation_indices[1]]
-        local_goals = self.goal_layer[orientation_indices[0], orientation_indices[1]]
-        input = dot(self.h9powers, local_walls) + dot(self.l9powers, local_goals)
+        # Read orientation indices without mutating the class-level array.
+        ori = int(self.orientation)
+        oi = self.orientation_indices[ori]  # shape (2, 9) – read-only view
+        mask = self.environment.wrap_mask
+        row_idx = (oi[0] + int(self.y)) & mask
+        col_idx = (oi[1] + int(self.x)) & mask
+        local_walls = self.wall_layer[row_idx, col_idx]
+        local_goals = self.goal_layer[row_idx, col_idx]
+        inp = int(dot(self.h9powers, local_walls)) + int(
+            dot(self.l9powers, local_goals)
+        )
 
         # Perform a tick of the automaton with the input and get the action
-        self.take_action(self._tick(input))
+        self.take_action(self._tick(inp))
 
     def turn_left(self) -> None:
         """Turn the automaton left (counter-clockwise)."""

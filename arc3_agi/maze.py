@@ -10,7 +10,7 @@ import matplotlib
 
 matplotlib.use("webagg")
 import matplotlib.pyplot as plt
-from numpy import argwhere, int32, ones, uint8, uint16, zeros
+from numpy import argwhere, array, int32, ones, uint8, uint16, uint32, zeros
 from numpy.random import default_rng
 from numpy.typing import NDArray
 
@@ -233,9 +233,9 @@ class MazeAutomaton(Automaton, radius=1, environment=Maze()):
     def __init__(
         self,
         genetic_code: GeneticCode2DGrid,
-        state: uint16,
-        x: int32,
-        y: int32,
+        state: int,
+        x: int,
+        y: int,
         orientation: Automaton.Orientation,
     ) -> None:
         super().__init__(genetic_code, state, x, y, orientation)
@@ -284,9 +284,9 @@ class Population:
         self.automata = [
             MazeAutomaton(
                 genetic_code=GeneticCode2DGrid(),
-                state=UINT16_ZERO,
-                x=INT32_ZERO,
-                y=INT32_ZERO,
+                state=0,
+                x=0,
+                y=0,
                 orientation=Automaton.Orientation(randrange(4)),
             )
             for _ in range(size)
@@ -295,9 +295,56 @@ class Population:
         self.maze = self.automata[0].environment
 
     def tick(self) -> None:
-        """Perform a tick for all automata in the population."""
-        for automaton in self.automata:
-            automaton.tick()
+        """Perform a tick for all automata using batched environment observation.
+
+        Rather than calling each automaton's individual tick() (which fires six
+        tiny numpy operations per automaton), we gather every automaton's
+        position and orientation into arrays and perform the environment
+        observation in a single vectorised pass over all 100 automata at once.
+        The genetic-code lookups and post-action logic remain per-automaton.
+        """
+        n = len(self.automata)
+        mask = self.maze.wrap_mask
+        oi = MazeAutomaton.orientation_indices  # (4, 2, 9) – never modified
+        wall_layer = self.maze.ilayers[self.maze.LKEYS.WALL]
+        goal_layer = self.maze.ilayers[self.maze.LKEYS.GOAL]
+        h9p = MazeAutomaton.h9powers  # (9,) uint32
+        l9p = MazeAutomaton.l9powers  # (9,) uint32
+
+        # --- Vectorised environment observation --------------------------------
+        ys = array([int(a.y) for a in self.automata], dtype=int32)
+        xs = array([int(a.x) for a in self.automata], dtype=int32)
+        oris = array([int(a.orientation) for a in self.automata], dtype=int32)
+
+        # oi[oris, 0/1, :] selects the row/col offset table for each automaton's
+        # orientation; shape (n, 9). Adding positions broadcasts to (n, 9).
+        abs_rows = (oi[oris, 0, :] + ys[:, None]) & mask  # (n, 9)
+        abs_cols = (oi[oris, 1, :] + xs[:, None]) & mask  # (n, 9)
+
+        local_walls = wall_layer[abs_rows, abs_cols]  # (n, 9) uint8
+        local_goals = goal_layer[abs_rows, abs_cols]  # (n, 9) uint8
+
+        # Combine wall + goal channels into a single uint32 input per automaton.
+        # tolist() converts the numpy array to a Python list of plain ints,
+        # which is faster to iterate than indexing numpy scalars one by one.
+        inputs = (
+            local_walls.astype(uint32) @ h9p + local_goals.astype(uint32) @ l9p
+        ).tolist()
+
+        # --- Per-automaton genetic code, action and goal logic -----------------
+        for i, a in enumerate(self.automata):
+            a._state = a.genetic_code.get_state(inputs[i], a._state)
+            action = a.genetic_code.get_action(a._state)
+            if action == 0:  # MOVE_FORWARD
+                a.move_forward()  # MazeAutomaton.move_forward handles wall collision
+            elif action == 1:  # TURN_LEFT
+                a.turn_left()
+            else:  # TURN_RIGHT
+                a.turn_right()
+            if goal_layer[int(a.y), int(a.x)] == 1:
+                a.reset_stats()
+                a.fitness += 100.0
+                a.start_position()
 
     def evolve(self) -> None:
         """Evolve the population based on some fitness function."""
@@ -318,9 +365,9 @@ class Population:
             child_genetic_code = parent1.genetic_code.crossover(parent2.genetic_code)
             child = MazeAutomaton(
                 genetic_code=child_genetic_code,
-                state=UINT16_ZERO,
-                x=INT32_ZERO,
-                y=INT32_ZERO,
+                state=0,
+                x=0,
+                y=0,
                 orientation=Automaton.Orientation(randrange(4)),
             )
             offspring.append(child)

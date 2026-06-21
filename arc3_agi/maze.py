@@ -1,26 +1,25 @@
-"""Simple maze environment for testing Automatons."""
-
-from __future__ import annotations
-
-from calendar import EPOCH
-from random import getrandbits, randrange
-from typing import Optional, Tuple
+from enum import IntEnum
+from operator import is_
+from signal import SIGINT, signal
+from typing import Optional
 
 import matplotlib
-
-matplotlib.use("webagg")
-import matplotlib.pyplot as plt
-from numpy import argwhere, array, int32, ones, uint8, uint16, uint32, zeros
+from numpy import (
+    argwhere,
+    array,
+    ones,
+    uint8,
+    zeros,
+)
 from numpy.random import default_rng
 from numpy.typing import NDArray
 
-from arc3_agi.terry2 import (
-    INT32_ZERO,
-    UINT16_ZERO,
-    Automaton,
-    Environment2DGrid,
-    GeneticCode2DGrid,
-)
+from arc3_agi.automaton import ActionStatus, AutomatonISBase
+from arc3_agi.environment import LayeredStaticBoolean2DGrid, StaticBoolean2DGrid
+from arc3_agi.genetic_code import GeneticCode, GeneticCodeDict
+
+matplotlib.use("webagg")
+import matplotlib.pyplot as plt
 
 
 def generate_maze(
@@ -41,7 +40,8 @@ def generate_maze(
     wall : NDArray[uint8], shape (side, side)
         1 = wall, 0 = free space.  Outer border is always 1.
     goal : NDArray[uint8], shape (side, side)
-        Exactly one cell is 1 (the goal); all others are 0.
+        1 = goal cell, 0 = non-goal.  Exactly one cell is the goal,
+        and it is always a free cell (i.e. the corresponding cell in `wall` is 0).
 
     Algorithm
     ---------
@@ -67,7 +67,7 @@ def generate_maze(
     # Visited flag indexed by (cell_row, cell_col) where cell coords are 0-based.
     visited = zeros((n_cells, n_cells), dtype=bool)
 
-    def cell_to_grid(cr: int, cc: int) -> Tuple[int, int]:
+    def cell_to_grid(cr: int, cc: int) -> tuple[int, int]:
         """Map cell index (0-based) to grid index."""
         return 2 * cr + 1, 2 * cc + 1
 
@@ -124,20 +124,164 @@ def generate_maze(
     return wall, goal
 
 
-class Maze(Environment2DGrid):
-    """A simple maze environment for testing Automatons."""
+class Maze(LayeredStaticBoolean2DGrid):
+    """A maze environment represented as a layered 2D grid.
 
-    def __init__(self, side_length_bits: int = 6, seed: Optional[int] = None) -> None:
-        super().__init__(side_length_bits)
-        self.add_layer(self.LKEYS.WALL, mutable=False)
-        self.add_layer(self.LKEYS.GOAL, mutable=False)
+    The maze consists of walls and a goal, represented as two layers in the grid.
+    """
 
-        wall, goal = generate_maze(side_length_bits, seed=seed)
-        self.ilayers[self.LKEYS.WALL][:] = wall
-        self.ilayers[self.LKEYS.GOAL][:] = goal
+    class LKEYS(IntEnum):
+        WALL = 0
+        GOAL = 1
 
-        self.free_cells = argwhere(wall == 0)
-        self.rng = default_rng(seed)
+    Orientation = LayeredStaticBoolean2DGrid.Orientation
+
+    def __init__(
+        self, name: str, side_length_bits: int, seed: Optional[int] = None
+    ) -> None:
+        """Initializes the maze environment.
+
+        Args:
+            name: The name of the maze environment.
+            side_length_bits: The number of bits to determine the side length of the maze (2^side_length_bits).
+            seed: An optional integer seed for reproducible maze generation.
+        """
+        wall, goal = generate_maze(side_length_bits, seed)
+        super().__init__(
+            name=name,
+            grid=[
+                [int(wall[i, j]) for j in range(wall.shape[1])]
+                for i in range(wall.shape[0])
+            ],
+            num_layers=1,
+        )
+        self.add_layer(
+            StaticBoolean2DGrid(
+                name=f"{name}_goal",
+                grid=[
+                    [int(goal[i, j]) for j in range(goal.shape[1])]
+                    for i in range(goal.shape[0])
+                ],
+            )
+        )
+        self.width = wall.shape[1]
+        self.height = wall.shape[0]
+        self.wall_grid = self.layers[self.LKEYS.WALL].get()
+        self.goal_grid = self.layers[self.LKEYS.GOAL].get()
+        self.wall_layer = self.layers[self.LKEYS.WALL]
+        self.goal_layer = self.layers[self.LKEYS.GOAL]
+
+    def get_local(self, coords: list[int], **kwargs) -> bytes:
+        """Returns the local environment stimulus for the given coordinates.
+        NOTE: This only returns the wall layer.
+        """
+        return self.wall_layer.get_local(coords, **kwargs)
+
+    def is_goal(self, x: int, y: int) -> bool:
+        """Checks if the cell at (x, y) is the goal."""
+        return self.goal_grid[y][x]
+
+    def is_wall(self, x: int, y: int) -> bool:
+        """Checks if the cell at (x, y) is a wall."""
+        return self.wall_grid[y][x]
+
+
+class MazeAutomaton(AutomatonISBase):
+    """Represents the automaton for Terry's world."""
+
+    def __init__(self, **kwargs) -> None:
+        """Initialize the automaton.
+
+        Expects kwargs:
+            name: Optional name for the automaton.
+            genetic_code: Optional genetic code for the automaton. If not provided,
+                a default empty code is used.
+            x: Initial x-coordinate (column) of the automaton in the maze. Default is 0.
+            y: Initial y-coordinate (row) of the automaton in the maze. Default is 0.
+            orientation: Initial orientation of the automaton. Should be an instance
+                of Maze.Orientation. Default is Maze.Orientation.UP.
+            maze: The Maze environment instance that the automaton will interact with.
+                This is required.
+        """
+        super().__init__(
+            name=kwargs.get("name", "Terry-2"),
+            genetic_code=kwargs.get("genetic_code", GeneticCodeDict({})),
+            env_len=2,
+            state_len=1,
+            resp_len=2,
+        )
+        self.coords = [
+            kwargs.get("x", 0),
+            kwargs.get("y", 0),
+            kwargs.get("orientation", Maze.Orientation.UP).value,
+        ]
+        self.act_len = self.resp_len - self.state_len
+        assert "maze" in kwargs, "MazeAutomaton requires 'maze' in kwargs."
+        self.maze: Maze = kwargs["maze"]
+
+        # Since automata do not interact in anyway, even through the environment
+        # they each have a separate energy grid for tracking coverage and
+        # encouraging exploration.
+        # If an automaton moves into a cell, it gets energy for that cell once
+        # and then that cell is "depleted" for that automaton. This encourages
+        # exploration of new cells rather than camping in one place or going back
+        # and forth between a few cells.
+        # NOTE: The automaton cannot 'see' the energy grid; it is only used for
+        # shaping the fitness function so that the automaton is incentivized to
+        # explore the maze and find the goal.
+        self.energy: int = 10  # Initial energy for the automaton; can be tuned.
+        self.energy_grid: list[list[bool]] = [
+            [True for _ in range(self.maze.width)] for _ in range(self.maze.height)
+        ]
+        self.fitness = 0.0
+
+    def attempt_action(self, action: bytes) -> ActionStatus:
+        """Perform the given action."""
+        match action:
+            case b"\x00":  # Move forward
+                move = Maze.orientation_moves[Maze.Orientation(self.coords[2])]
+                dx = move[0] + self.coords[0]
+                dy = move[1] + self.coords[1]
+
+                # Check for wall collision and bounds
+                if self.maze.is_wall(dx, dy):
+                    # NOTE: The maze is bordered by walls, so out-of-bounds
+                    # is also a wall collision.
+                    return ActionStatus.FAILED
+
+                # If it is free space move
+                x = self.coords[0] + move[0]
+                y = self.coords[1] + move[1]
+
+                # See if energy is there
+                energy = self.energy_grid[y][x]
+                self.fitness += energy
+                self.energy += energy * 2  # Gain energy for moving into a new cell.
+                self.energy_grid[y][x] = False
+
+                # Is it the goal?
+                if self.maze.is_goal(x, y):
+                    self.fitness += 100.0  # Big fitness boost for reaching the goal.
+                    self.energy += 50  # Bonus energy for reaching the goal
+
+                self.coords[0] = x
+                self.coords[1] = y
+                return ActionStatus.SUCCEEDED
+            case b"\x01":  # Turn left
+                self.coords[2] = (self.coords[2] - 1) & 3
+                return ActionStatus.SUCCEEDED
+            case b"\x02":  # Turn right
+                self.coords[2] = (self.coords[2] + 1) & 3
+                return ActionStatus.SUCCEEDED
+            case _:
+                raise ValueError(f"Invalid action: {action}")
+
+    def tick(self, environment: bytes) -> bytes:
+        """Perform a tick of the automaton."""
+        response = super().tick(environment)  # Update internal state and get response
+        self.energy -= 1  # Each tick costs 1 energy; can be tuned.
+        self.attempt_action(response)
+        return response
 
 
 class MazeRenderer:
@@ -160,8 +304,8 @@ class MazeRenderer:
         cs = self.cs
         h, w = self.maze.height, self.maze.width
         rgb = zeros((h * cs, w * cs, 3), dtype=uint8)  # black = free
-        wall_layer = self.maze.ilayers[self.maze.LKEYS.WALL]
-        goal_layer = self.maze.ilayers[self.maze.LKEYS.GOAL]
+        wall_layer = array(self.maze.layers[self.maze.LKEYS.WALL].get(), dtype=uint8)
+        goal_layer = array(self.maze.layers[self.maze.LKEYS.GOAL].get(), dtype=uint8)
         wall_up = wall_layer.repeat(cs, axis=0).repeat(cs, axis=1)
         goal_up = goal_layer.repeat(cs, axis=0).repeat(cs, axis=1)
         rgb[wall_up == 1] = [255, 255, 255]  # walls → white
@@ -227,176 +371,71 @@ class MazeRenderer:
         plt.close(self.fig)
 
 
-class MazeAutomaton(Automaton, radius=1, environment=Maze()):
-    """Automaton that can navigate a maze environment."""
+class FitnessRenderer:
+    """Live histogram showing the fitness distribution of the population."""
 
-    def __init__(
-        self,
-        genetic_code: GeneticCode2DGrid,
-        state: int,
-        x: int,
-        y: int,
-        orientation: Automaton.Orientation,
-    ) -> None:
-        super().__init__(genetic_code, state, x, y, orientation)
-        self.bumps_into_wall = 0
-        self.num_moves = 0
-        self.fitness = 0.0
-        self.start_position()
+    def __init__(self) -> None:
+        self.fig, self.ax = plt.subplots(figsize=(6, 4))
+        if self.fig.canvas.manager is not None:
+            self.fig.canvas.manager.set_window_title("Fitness Distribution")
+        self.generation = 0
+        self.ax.set_xlabel("Fitness")
+        self.ax.set_ylabel("Count")
+        self.ax.set_title("Generation 0 – Fitness Distribution")
+        self.fig.tight_layout()
+        self.fig.canvas.draw()
+        self.fig.canvas.flush_events()
 
-    def reset_stats(self) -> None:
-        self.bumps_into_wall = 0
-        self.num_moves = 0
+    def update(self, fitnesses: list[float]) -> None:
+        self.generation += 1
+        self.ax.cla()
+        self.ax.hist(fitnesses, bins=20, color="steelblue", edgecolor="black")
+        mn = min(fitnesses)
+        mx = max(fitnesses)
+        mean = sum(fitnesses) / len(fitnesses)
+        self.ax.axvline(
+            mean,
+            color="crimson",
+            linestyle="--",
+            linewidth=1.5,
+            label=f"mean={mean:.1f}",
+        )
+        self.ax.set_xlabel("Fitness")
+        self.ax.set_ylabel("Count")
+        self.ax.set_title(
+            f"Generation {self.generation}  –  min={mn:.1f}  mean={mean:.1f}  max={mx:.1f}"
+        )
+        self.ax.legend()
+        self.fig.tight_layout()
+        self.fig.canvas.draw_idle()
 
-    def start_position(self) -> None:
-        assert isinstance(self.environment, Maze)
-        pos = self.environment.free_cells[
-            int(self.environment.rng.integers(0, len(self.environment.free_cells)))
-        ]
-        self.y, self.x = int32(pos[0]), int32(pos[1])
+    def is_open(self) -> bool:
+        return plt.fignum_exists(self.fig.number)
 
-    def tick(self) -> None:
-        """Perform one tick of the automaton's behavior."""
-        super().tick()  # Get action from genetic code and update position/orientation.
-        if self.goal_layer[self.y, self.x] == 1:
-            self.reset_stats()  # Reset stats for the next run.
-            self.fitness += 100.0  # Large reward for reaching the goal.
-            self.start_position()  # Teleport to a new random free cell.
-
-    def move_forward(self) -> None:
-        """Move forward in the current orientation if possible."""
-        old_x = self.x
-        old_y = self.y
-        super().move_forward()
-        # Check for wall collision; if collided, revert to old position.
-        if self.environment.ilayers[self.environment.LKEYS.WALL][self.y, self.x] == 1:
-            self.x = old_x
-            self.y = old_y
-            self.bumps_into_wall += 1
-        else:
-            self.num_moves += 1
-
-
-class Population:
-    """Represents a population of automata for evolutionary processes."""
-
-    def __init__(self, size: int) -> None:
-        self.automata = [
-            MazeAutomaton(
-                genetic_code=GeneticCode2DGrid(),
-                state=0,
-                x=0,
-                y=0,
-                orientation=Automaton.Orientation(randrange(4)),
-            )
-            for _ in range(size)
-        ]
-        # All automata share the same maze environment.
-        self.maze = self.automata[0].environment
-
-    def tick(self) -> None:
-        """Perform a tick for all automata using batched environment observation.
-
-        Rather than calling each automaton's individual tick() (which fires six
-        tiny numpy operations per automaton), we gather every automaton's
-        position and orientation into arrays and perform the environment
-        observation in a single vectorised pass over all 100 automata at once.
-        The genetic-code lookups and post-action logic remain per-automaton.
-        """
-        n = len(self.automata)
-        mask = self.maze.wrap_mask
-        oi = MazeAutomaton.orientation_indices  # (4, 2, 9) – never modified
-        wall_layer = self.maze.ilayers[self.maze.LKEYS.WALL]
-        goal_layer = self.maze.ilayers[self.maze.LKEYS.GOAL]
-        h9p = MazeAutomaton.h9powers  # (9,) uint32
-        l9p = MazeAutomaton.l9powers  # (9,) uint32
-
-        # --- Vectorised environment observation --------------------------------
-        ys = array([int(a.y) for a in self.automata], dtype=int32)
-        xs = array([int(a.x) for a in self.automata], dtype=int32)
-        oris = array([int(a.orientation) for a in self.automata], dtype=int32)
-
-        # oi[oris, 0/1, :] selects the row/col offset table for each automaton's
-        # orientation; shape (n, 9). Adding positions broadcasts to (n, 9).
-        abs_rows = (oi[oris, 0, :] + ys[:, None]) & mask  # (n, 9)
-        abs_cols = (oi[oris, 1, :] + xs[:, None]) & mask  # (n, 9)
-
-        local_walls = wall_layer[abs_rows, abs_cols]  # (n, 9) uint8
-        local_goals = goal_layer[abs_rows, abs_cols]  # (n, 9) uint8
-
-        # Combine wall + goal channels into a single uint32 input per automaton.
-        # tolist() converts the numpy array to a Python list of plain ints,
-        # which is faster to iterate than indexing numpy scalars one by one.
-        inputs = (
-            local_walls.astype(uint32) @ h9p + local_goals.astype(uint32) @ l9p
-        ).tolist()
-
-        # --- Per-automaton genetic code, action and goal logic -----------------
-        for i, a in enumerate(self.automata):
-            a._state = a.genetic_code.get_state(inputs[i], a._state)
-            action = a.genetic_code.get_action(a._state)
-            if action == 0:  # MOVE_FORWARD
-                a.move_forward()  # MazeAutomaton.move_forward handles wall collision
-            elif action == 1:  # TURN_LEFT
-                a.turn_left()
-            else:  # TURN_RIGHT
-                a.turn_right()
-            if goal_layer[int(a.y), int(a.x)] == 1:
-                a.reset_stats()
-                a.fitness += 100.0
-                a.start_position()
-
-    def evolve(self) -> None:
-        """Evolve the population based on some fitness function."""
-        for a in self.automata:
-            # Simple fitness function: prioritize reaching the goal, then surviving longer,
-            # then fewer wall bumps, then more moves.
-            a.fitness = a.fitness + (-1.0 * a.bumps_into_wall + 1.0 * a.num_moves)
-        self.automata.sort(key=lambda a: a.fitness, reverse=True)
-        # For simplicity, we can just keep the top 50% of the population and
-        # replace the rest with offspring of the top performers.
-        survivors = self.automata[: len(self.automata) // 2]
-        offspring = []
-        for i in range(len(self.automata) // 2):
-            parent1 = survivors[randrange(len(survivors))]
-            assert isinstance(parent1.genetic_code, GeneticCode2DGrid)
-            parent2 = survivors[randrange(len(survivors))]
-            assert isinstance(parent2.genetic_code, GeneticCode2DGrid)
-            child_genetic_code = parent1.genetic_code.crossover(parent2.genetic_code)
-            child = MazeAutomaton(
-                genetic_code=child_genetic_code,
-                state=0,
-                x=0,
-                y=0,
-                orientation=Automaton.Orientation(randrange(4)),
-            )
-            offspring.append(child)
-        self.automata[len(self.automata) // 2 :] = offspring
-        for a in self.automata:
-            a.reset_stats()
-            a.fitness = 0.0
+    def close(self) -> None:
+        plt.close(self.fig)
 
 
 if __name__ == "__main__":
-    import signal
-
+    # Example usage: generate and render a maze.
     FPS = 10
-    TICKS_PER_EVOLVE = 100
-
-    population = Population(size=100)
-    rng = default_rng(42)
-    maze = population.maze
-    assert isinstance(maze, Maze)
+    maze = Maze(name="ExampleMaze", side_length_bits=6, seed=42)
+    automata = [
+        MazeAutomaton(
+            name=f"Automaton{i}",
+            maze=maze,
+        )
+        for i in range(50)
+    ]
     renderer = MazeRenderer(maze)
-    tick_count = [0]
+    fitness_renderer = FitnessRenderer()
 
     def _simulation_step():
-        population.tick()
-        tick_count[0] += 1
-
-        if tick_count[0] % TICKS_PER_EVOLVE == 0:
-            population.evolve()
-        renderer.render(population.automata)
+        for automaton in automata:
+            automaton.tick(maze.get_local(automaton.coords))
+        fitnesses = [a.fitness for a in automata]
+        fitness_renderer.update(fitnesses)
+        renderer.render(automata[:25])
 
     _timer = renderer.fig.canvas.new_timer(interval=max(1, 1000 // FPS))
     _timer.add_callback(_simulation_step)
@@ -406,9 +445,10 @@ if __name__ == "__main__":
         _timer.stop()
         plt.close("all")
 
-    signal.signal(signal.SIGINT, _sigint_handler)
+    signal(SIGINT, _sigint_handler)
 
     try:
         plt.show()
     finally:
         renderer.close()
+        fitness_renderer.close()

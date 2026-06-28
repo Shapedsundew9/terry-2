@@ -170,6 +170,13 @@ class Maze(LayeredStaticBoolean2DGrid):
         self.goal_grid = self.layers[self.LKEYS.GOAL].get()
         self.wall_layer = self.layers[self.LKEYS.WALL]
         self.goal_layer = self.layers[self.LKEYS.GOAL]
+        self.rng = default_rng(seed)
+        self.free = [
+            (x, y)
+            for y, row in enumerate(self.wall_grid)
+            for x, v in enumerate(row)
+            if not v
+        ]
 
     def get_local(self, coords: list[int], **kwargs) -> bytes:
         """Returns the local environment stimulus for the given coordinates.
@@ -184,6 +191,11 @@ class Maze(LayeredStaticBoolean2DGrid):
     def is_wall(self, x: int, y: int) -> bool:
         """Checks if the cell at (x, y) is a wall."""
         return self.wall_grid[y][x]
+
+    def random_free_cell(self, seed: Optional[int] = None) -> tuple[int, int]:
+        """Returns a random free (non-wall) cell as (x, y)."""
+        idx = int(self.rng.integers(0, len(self.free)))
+        return self.free[idx]
 
 
 class MazeAutomaton(AutomatonISBase):
@@ -205,19 +217,23 @@ class MazeAutomaton(AutomatonISBase):
         """
         super().__init__(
             name=kwargs.get("name", "Terry-2"),
-            genetic_code=kwargs.get("genetic_code", GeneticCodeDict({})),
-            env_len=2,
-            state_len=1,
-            resp_len=2,
+            genetic_code=kwargs.get("genetic_code", None),
+            env_bits=9,
+            state_bits=8,
+            resp_bits=2,
         )
+        if self.genetic_code is None:
+            self.genetic_code = GeneticCodeDict(
+                {}, resp_bits=(self.state_bytes + self.resp_bytes) << 3
+            )
+        self.maze: Maze = kwargs["maze"]
+        fx, fy = self.maze.random_free_cell()
         self.coords = [
-            kwargs.get("x", 0),
-            kwargs.get("y", 0),
+            kwargs.get("x", fx),
+            kwargs.get("y", fy),
             kwargs.get("orientation", Maze.Orientation.UP).value,
         ]
-        self.act_len = self.resp_len - self.state_len
         assert "maze" in kwargs, "MazeAutomaton requires 'maze' in kwargs."
-        self.maze: Maze = kwargs["maze"]
 
         # Since automata do not interact in anyway, even through the environment
         # they each have a separate energy grid for tracking coverage and
@@ -235,10 +251,23 @@ class MazeAutomaton(AutomatonISBase):
         ]
         self.fitness = 0.0
 
+    @property
+    def x(self) -> int:
+        return self.coords[0]
+
+    @property
+    def y(self) -> int:
+        return self.coords[1]
+
+    @property
+    def orientation(self) -> Maze.Orientation:
+        return Maze.Orientation(self.coords[2])
+
     def attempt_action(self, action: bytes) -> ActionStatus:
         """Perform the given action."""
-        match action:
-            case b"\x00":  # Move forward
+        action_int = (action[0] if action else 0) & ((1 << self.resp_bits) - 1)
+        match action_int:
+            case 0:  # Move forward
                 move = Maze.orientation_moves[Maze.Orientation(self.coords[2])]
                 dx = move[0] + self.coords[0]
                 dy = move[1] + self.coords[1]
@@ -267,21 +296,22 @@ class MazeAutomaton(AutomatonISBase):
                 self.coords[0] = x
                 self.coords[1] = y
                 return ActionStatus.SUCCEEDED
-            case b"\x01":  # Turn left
+            case 1:  # Turn left
                 self.coords[2] = (self.coords[2] - 1) & 3
                 return ActionStatus.SUCCEEDED
-            case b"\x02":  # Turn right
+            case 2:  # Turn right
                 self.coords[2] = (self.coords[2] + 1) & 3
                 return ActionStatus.SUCCEEDED
             case _:
-                raise ValueError(f"Invalid action: {action}")
+                return ActionStatus.INVALID
 
     def tick(self, environment: bytes) -> bytes:
         """Perform a tick of the automaton."""
-        response = super().tick(environment)  # Update internal state and get response
+        # super().tick() already updates internal_state and returns only the action bytes.
+        action = super().tick(environment)
         self.energy -= 1  # Each tick costs 1 energy; can be tuned.
-        self.attempt_action(response)
-        return response
+        self.attempt_action(action)
+        return action
 
 
 class MazeRenderer:
@@ -431,11 +461,17 @@ if __name__ == "__main__":
     fitness_renderer = FitnessRenderer()
 
     def _simulation_step():
-        for automaton in automata:
-            automaton.tick(maze.get_local(automaton.coords))
-        fitnesses = [a.fitness for a in automata]
-        fitness_renderer.update(fitnesses)
-        renderer.render(automata[:25])
+        import traceback
+
+        try:
+            for automaton in automata:
+                automaton.tick(maze.get_local(automaton.coords))
+            fitnesses = [a.fitness for a in automata]
+            fitness_renderer.update(fitnesses)
+            renderer.render(automata[:25])
+        except Exception:
+            traceback.print_exc()
+            _timer.stop()
 
     _timer = renderer.fig.canvas.new_timer(interval=max(1, 1000 // FPS))
     _timer.add_callback(_simulation_step)

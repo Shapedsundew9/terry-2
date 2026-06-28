@@ -61,24 +61,25 @@ class AutomatonISBase(AutomatonBase):
         Args:
             name: The name of the automaton. Arbitrary string identifier.
             genetic_code: The genetic code of the automaton.
-            env_len: (int) The length of the environment byte string.
-            state_len: (int) The length of the internal state byte string.
-            resp_len: (int) The length of the response byte string.
+            env_bits: (int) The length of the environment byte string in bits.
+            state_bits: (int) The length of the internal state byte string in bits.
+            resp_bits: (int) The length of the response byte string in bits.
         """
         super().__init__(**kwargs)
 
-        if "env_len" not in kwargs:
-            raise ValueError("AutomatonISBase requires 'env_len' in kwargs.")
-        if "state_len" not in kwargs:
-            raise ValueError("AutomatonISBase requires 'state_len' in kwargs.")
-        if "resp_len" not in kwargs:
-            raise ValueError("AutomatonISBase requires 'resp_len' in kwargs.")
-        self.env_len = kwargs["env_len"]
-        self.state_len = kwargs["state_len"]
-        self.resp_len = kwargs["resp_len"]
-        self.internal_state: bytes = bytes(
-            self.state_len
-        )  # initialize internal state to all zeros
+        if "env_bits" not in kwargs:
+            raise ValueError("AutomatonISBase requires 'env_bits' in kwargs.")
+        if "state_bits" not in kwargs:
+            raise ValueError("AutomatonISBase requires 'state_bits' in kwargs.")
+        if "resp_bits" not in kwargs:
+            raise ValueError("AutomatonISBase requires 'resp_bits' in kwargs.")
+        self.env_bits = kwargs["env_bits"]
+        self.env_bytes = (self.env_bits + 7) >> 3
+        self.state_bits = kwargs["state_bits"]
+        self.state_bytes = (self.state_bits + 7) >> 3
+        self.resp_bits = kwargs["resp_bits"]
+        self.resp_bytes = (self.resp_bits + 7) >> 3
+        self.internal_state: bytes = bytes(self.state_bytes)
 
     def tick(self, environment: bytes) -> bytes:
         """Given the current environment stimulus, compute the response and update internal state.
@@ -91,8 +92,8 @@ class AutomatonISBase(AutomatonBase):
         """
         input_code = self.internal_state + environment
         output_code = self.genetic_code[input_code]
-        self.internal_state = output_code[: self.state_len]
-        response = output_code[self.state_len : self.state_len + self.resp_len]
+        self.internal_state = output_code[: self.state_bytes]
+        response = output_code[self.state_bytes :]
         return response
 
     def attempt_action(self, action: bytes) -> ActionStatus:

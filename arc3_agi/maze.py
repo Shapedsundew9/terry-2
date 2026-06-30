@@ -155,6 +155,7 @@ class Maze(LayeredStaticBoolean2DGrid):
                 for i in range(wall.shape[0])
             ],
             num_layers=1,
+            radius=1,
         )
         self.add_layer(
             StaticBoolean2DGrid(
@@ -425,6 +426,43 @@ class MazeRenderer:
         plt.close(self.fig)
 
 
+class FitnessHistoryRenderer:
+    """Live line chart showing mean and max fitness per generation."""
+
+    def __init__(self) -> None:
+        self.fig, self.ax = plt.subplots(figsize=(6, 4))
+        if self.fig.canvas.manager is not None:
+            self.fig.canvas.manager.set_window_title("Fitness History")
+        self._means: list[float] = []
+        self._maxes: list[float] = []
+        self.ax.set_xlabel("Generation")
+        self.ax.set_ylabel("Fitness")
+        self.ax.set_title("Fitness History")
+        self.fig.tight_layout()
+        self.fig.canvas.draw()
+        self.fig.canvas.flush_events()
+
+    def update(self, fitnesses: list[float]) -> None:
+        self._means.append(sum(fitnesses) / len(fitnesses))
+        self._maxes.append(max(fitnesses))
+        gens = list(range(1, len(self._means) + 1))
+        self.ax.cla()
+        self.ax.plot(gens, self._means, color="crimson", linewidth=1.5, label="mean")
+        self.ax.plot(gens, self._maxes, color="steelblue", linewidth=1.5, label="max")
+        self.ax.set_xlabel("Generation")
+        self.ax.set_ylabel("Fitness")
+        self.ax.set_title("Fitness History")
+        self.ax.legend()
+        self.fig.tight_layout()
+        self.fig.canvas.draw_idle()
+
+    def is_open(self) -> bool:
+        return plt.fignum_exists(self.fig.number)
+
+    def close(self) -> None:
+        plt.close(self.fig)
+
+
 class FitnessRenderer:
     """Live histogram showing the fitness distribution of the population."""
 
@@ -477,6 +515,7 @@ if __name__ == "__main__":
     population = Population(size=100, AutomatonClass=MazeAutomaton, environment=maze)
     renderer = MazeRenderer(maze)
     fitness_renderer = FitnessRenderer()
+    fitness_history_renderer = FitnessHistoryRenderer()
 
     def _simulation_step():
         import traceback
@@ -485,7 +524,9 @@ if __name__ == "__main__":
             population.tick()
             renderer.render(population.automata[:20])
             if population.tick_count % 50 == 0:  # Evolve every 50 ticks
-                fitness_renderer.update(population.evolve())
+                fitnesses = population.evolve()
+                fitness_renderer.update(fitnesses)
+                fitness_history_renderer.update(fitnesses)
         except Exception:
             traceback.print_exc()
             _timer.stop()
@@ -505,3 +546,4 @@ if __name__ == "__main__":
     finally:
         renderer.close()
         fitness_renderer.close()
+        fitness_history_renderer.close()

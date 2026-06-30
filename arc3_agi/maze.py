@@ -16,7 +16,7 @@ from numpy.typing import NDArray
 
 from arc3_agi.automaton import ActionStatus, AutomatonISBase
 from arc3_agi.environment import LayeredStaticBoolean2DGrid, StaticBoolean2DGrid
-from arc3_agi.genetic_code import GeneticCode, GeneticCodeDict
+from arc3_agi.genetic_code import GeneticCode, GeneticCodeDict, GeneticCodeGraph
 from arc3_agi.population import Population
 
 matplotlib.use("webagg")
@@ -221,13 +221,15 @@ class MazeAutomaton(AutomatonISBase):
             name=kwargs.get("name", "Terry-2"),
             genetic_code=kwargs.get("genetic_code", None),
             env_bits=9,
-            state_bits=5,
+            state_bits=4,
             resp_bits=2,
             environment=kwargs.get("environment"),
         )
         if self.genetic_code is None:
-            self.genetic_code = GeneticCodeDict(
-                {}, resp_bits=self.state_bits + self.resp_bits
+            self.genetic_code = GeneticCodeGraph(
+                num_nodes=64,
+                input_bits=self.env_bits + self.state_bits,
+                resp_bits=self.state_bits + self.resp_bits,
             )
         assert isinstance(
             self.environment, Maze

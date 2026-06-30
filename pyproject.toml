@@ -19,3 +19,6 @@ package-dir = { "" = "." }
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["arc3_agi*"]
+
+[tool.pytest.ini_options]
+testpaths = ["arc3_agi/tests"]

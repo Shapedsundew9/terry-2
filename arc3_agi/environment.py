@@ -15,8 +15,8 @@ class Environment:
         raise NotImplementedError("get method must be implemented by subclasses")
 
     @abstractmethod
-    def get_local(self, coords: list[int], **kwargs) -> bytes:
-        """Returns a bitstring in a bytes object representing the local environment at
+    def get_local(self, coords: list[int], **kwargs) -> int:
+        """Returns an integer whose bits represent the local environment at
         the given coordinates.
         """
         raise NotImplementedError("get_local method must be implemented by subclasses")
@@ -54,21 +54,20 @@ class Int1DArray(Environment):
         """Returns the entire 1D array as a list of integers."""
         return self._array
 
-    def get_local(self, coords: list[int], **kwargs) -> bytes:
-        """Returns a bitstring representing the local environment around the
-        given coordinates. This implementation ignores the radius, border_value, and wrap
+    def get_local(self, coords: list[int], **kwargs) -> int:
+        """Returns an integer representing the local environment at the given
+        coordinates. This implementation ignores the radius, border_value, and wrap
         parameters since they are fixed at initialization.
 
         Args:
             coords: A list of [x] coordinates for the center of the local environment
 
         Returns:
-            A big endian bytes object representing the local environment as a bitstring, where
-            each bit MSb to LSb corresponds to a cell in the local area, ordered from left to right.
+            The integer value stored at the given coordinate.
         """
         x = coords[0]
         if 0 <= x < len(self._array):
-            return self._array[x].to_bytes(8, byteorder="big", signed=True)
+            return self._array[x]
         else:
             raise IndexError("Coordinates out of bounds for Int1DArray.")
 
@@ -173,8 +172,8 @@ class Boolean2DGrid(Environment):
         """
         return self._map
 
-    def get_local(self, coords: list[int], **kwargs) -> bytes:
-        """Returns a bitstring representing the local environment around the
+    def get_local(self, coords: list[int], **kwargs) -> int:
+        """Returns an integer representing the local environment around the
         given coordinates. If wrap is False, out-of-bounds cells will be treated
         as having the value of border_value.
 
@@ -190,7 +189,7 @@ class Boolean2DGrid(Environment):
             wrap: Whether to wrap around the edges of the grid (default: False)
 
         Returns:
-            A big endian bytes object representing the local environment as a bitstring, where
+            An integer representing the local environment as a bitstring, where
             each bit MSb to LSb corresponds to a cell in the local area, ordered from top-left
             to bottom-right.
         """
@@ -211,7 +210,7 @@ class Boolean2DGrid(Environment):
             else:
                 bitstring |= border_value << shift
             shift -= 1
-        return bitstring.to_bytes((num_cells >> 3) + 1, byteorder="big")
+        return bitstring
 
     def set(self, new_map: list[list[bool]]) -> None:
         """Sets the entire 2D grid to the provided map. The input should be a list
@@ -280,7 +279,7 @@ class StaticBoolean2DGrid(Boolean2DGrid):
         self._wrap: bool = kwargs.get("wrap", False)
         self.x_size = len(self._map[0])
         self.y_size = len(self._map)
-        self._local_cache: list[list[list[bytes]]] = [
+        self._local_cache: list[list[list[int]]] = [
             [
                 [
                     super().get_local(
@@ -300,8 +299,8 @@ class StaticBoolean2DGrid(Boolean2DGrid):
             for orientation in self.Orientation
         ]
 
-    def get_local(self, coords: list[int], **kwargs) -> bytes:
-        """Returns a bitstring representing the local environment around the
+    def get_local(self, coords: list[int], **kwargs) -> int:
+        """Returns an integer representing the local environment around the
         given coordinates. This implementation ignores the radius, border_value, and wrap
         parameters since they are fixed at initialization.
 
@@ -309,7 +308,7 @@ class StaticBoolean2DGrid(Boolean2DGrid):
             coords: A list of [x, y] coordinates for the center of the local environment
 
         Returns:
-            A big endian bytes object representing the local environment as a bitstring, where
+            An integer representing the local environment as a bitstring, where
             each bit MSb to LSb corresponds to a cell in the local area, ordered from top-left
             to bottom-right.
         """
@@ -401,8 +400,8 @@ class LayeredStaticBoolean2DGrid(Environment):
         represents a different layer."""
         return self._grid
 
-    def get_local(self, coords: list[int], **kwargs) -> bytes:
-        """Returns a bitstring representing the local environment around the
+    def get_local(self, coords: list[int], **kwargs) -> int:
+        """Returns an integer representing the local environment around the
         given coordinates. This implementation ignores the radius, border_value, and wrap
         parameters since they are fixed at initialization.
 
@@ -410,13 +409,16 @@ class LayeredStaticBoolean2DGrid(Environment):
             coords: A list of [x, y] coordinates for the center of the local environment
 
         Returns:
-            A big endian bytes object representing the local environment as a bitstring, where
-            each bit MSb to LSb corresponds to a cell in the local area, ordered from top-left
-            to bottom-right.
+            An integer representing the local environment as a bitstring, where
+            each bit MSb to LSb corresponds to a cell in the local area, with the
+            lowest-indexed layer occupying the least significant bits.
         """
-        retval = bytes()
+        retval = 0
+        shift = 0
         for layer in self.layers:
-            retval += layer.get_local(coords, **kwargs)
+            bits = (2 * layer._radius + 1) ** 2
+            retval |= layer.get_local(coords, **kwargs) << shift
+            shift += bits
         return retval
 
     def set(self, new_grid: list[list[int]]) -> None:

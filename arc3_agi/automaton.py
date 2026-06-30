@@ -39,8 +39,8 @@ class AutomatonBase:
         self.fitness: float = 0.0
         self.last_action: int = -1  # Last action taken.
 
-    def attempt_action(self, action: bytes) -> ActionStatus:
-        """Given an action byte string, attempt to perform the corresponding action.
+    def attempt_action(self, action: int) -> ActionStatus:
+        """Given an action integer, attempt to perform the corresponding action.
 
         The action is an attempt as the environment may not allow it (e.g. moving
         into a wall). The automaton can use the result of the action to update its
@@ -51,12 +51,12 @@ class AutomatonBase:
         by the tick method.
 
         Args:
-            action: A byte string representing the action to be taken.
+            action: An integer representing the action to be taken.
 
         Returns:
             An ActionStatus enum value representing the result of the action.
         """
-        self.last_action = int.from_bytes(action, byteorder="big")
+        self.last_action = action
         return ActionStatus.SUCCEEDED
 
     def reset(self) -> None:
@@ -65,14 +65,11 @@ class AutomatonBase:
         self.coords = []
         self.last_action = -1
 
-    def tick(self) -> bytes:
+    def tick(self) -> int:
         """Given the current environment stimulus, compute the response.
 
-        Args:
-            environment: A byte string representing the current stimulus from the environment.
-
         Returns:
-            A byte string representing the response of the automaton.
+            An integer representing the response of the automaton.
         """
         raise NotImplementedError("Automaton.tick() must be implemented by subclasses.")
 
@@ -111,25 +108,28 @@ class AutomatonISBase(AutomatonBase):
         self.state_bytes = (self.state_bits + 7) >> 3
         self.resp_bits = kwargs["resp_bits"]
         self.resp_bytes = (self.resp_bits + 7) >> 3
-        self.internal_state: bytes = bytes(self.state_bytes)
+        self.env_mask = (1 << self.env_bits) - 1
+        self.state_mask = (1 << self.state_bits) - 1
+        self.resp_mask = (1 << self.resp_bits) - 1
+        self.internal_state: int = 0
 
     def reset(self) -> None:
         """Resets the automaton's internal state and fitness."""
         super().reset()
-        self.internal_state = bytes(self.state_bytes)
+        self.internal_state = 0
 
-    def tick(self) -> bytes:
+    def tick(self) -> int:
         """Given the current environment stimulus, compute the response and update internal state.
 
-        Args:
-            environment: A byte string representing the current stimulus from the environment.
-
         Returns:
-            A byte string representing the response of the automaton.
+            An integer representing the response of the automaton. The low
+            ``state_bits`` of the genetic code output become the new internal
+            state; the remaining high bits are returned as the response.
         """
-        input_code = self.internal_state + self.environment.get_local(self.coords)
+        input_code = (self.internal_state << self.env_bits) | (
+            self.environment.get_local(self.coords) & self.env_mask
+        )
         output_code = self.genetic_code[input_code]
-        # NB: The output code is a byte string not an integer so the MSBs are the internal state.
-        self.internal_state = output_code[self.resp_bytes :]
-        response = output_code[: self.resp_bytes]
+        self.internal_state = output_code & self.state_mask
+        response = output_code >> self.state_bits
         return response

@@ -180,7 +180,7 @@ class Maze(LayeredStaticBoolean2DGrid):
             if not v
         ]
 
-    def get_local(self, coords: list[int], **kwargs) -> bytes:
+    def get_local(self, coords: list[int], **kwargs) -> int:
         """Returns the local environment stimulus for the given coordinates.
         NOTE: This only returns the wall layer.
         """
@@ -221,13 +221,13 @@ class MazeAutomaton(AutomatonISBase):
             name=kwargs.get("name", "Terry-2"),
             genetic_code=kwargs.get("genetic_code", None),
             env_bits=9,
-            state_bits=8,
+            state_bits=5,
             resp_bits=2,
             environment=kwargs.get("environment"),
         )
         if self.genetic_code is None:
             self.genetic_code = GeneticCodeDict(
-                {}, resp_bits=(self.state_bytes + self.resp_bytes) << 3
+                {}, resp_bits=self.state_bits + self.resp_bits
             )
         assert isinstance(
             self.environment, Maze
@@ -250,10 +250,10 @@ class MazeAutomaton(AutomatonISBase):
         # shaping the fitness function so that the automaton is incentivized to
         # explore the maze and find the goal.
         self.energy: int = 10  # Initial energy for the automaton; can be tuned.
-        self.energy_grid: list[list[bool]] = [
-            [True for _ in range(self.environment.width)]
-            for _ in range(self.environment.height)
-        ]
+        self._grid_width: int = self.environment.width
+        self.energy_grid: bytearray = bytearray(
+            b"\x01" * (self.environment.width * self.environment.height)
+        )
         self.fitness = 0.0
 
     @property
@@ -268,13 +268,13 @@ class MazeAutomaton(AutomatonISBase):
     def orientation(self) -> Maze.Orientation:
         return Maze.Orientation(self.coords[2])
 
-    def attempt_action(self, action: bytes) -> ActionStatus:
+    def attempt_action(self, action: int) -> ActionStatus:
         """Perform the given action."""
-        action_int = (action[0] if action else 0) & ((1 << self.resp_bits) - 1)
+        action_int = action & self.resp_mask
         self.last_action = action_int
         match action_int:
             case 0:  # Move forward
-                move = Maze.orientation_moves[Maze.Orientation(self.coords[2])]
+                move = Maze.orientation_moves[self.coords[2]]
                 dx = move[0] + self.coords[0]
                 dy = move[1] + self.coords[1]
 
@@ -292,10 +292,11 @@ class MazeAutomaton(AutomatonISBase):
                 y = self.coords[1] + move[1]
 
                 # See if energy is there
-                energy = self.energy_grid[y][x]
+                idx = y * self._grid_width + x
+                energy = self.energy_grid[idx]
                 self.fitness += energy
                 self.energy += energy * 2  # Gain energy for moving into a new cell.
-                self.energy_grid[y][x] = False
+                self.energy_grid[idx] = 0
 
                 # NOTE: Ignoring a goal for now.
                 # Is it the goal?
@@ -324,13 +325,12 @@ class MazeAutomaton(AutomatonISBase):
         fx, fy = self.environment.random_free_cell()
         self.coords = [fx, fy, Maze.Orientation.UP.value]
         self.energy = 10  # Reset energy to initial value.
-        self.energy_grid = [
-            [True for _ in range(self.environment.width)]
-            for _ in range(self.environment.height)
-        ]
+        self.energy_grid = bytearray(
+            b"\x01" * (self.environment.width * self.environment.height)
+        )
         self.fitness = 0.0
 
-    def tick(self) -> bytes:
+    def tick(self) -> int:
         """Perform a tick of the automaton."""
         # super().tick() already updates internal_state and returns only the action bytes.
         action = super().tick()
@@ -509,24 +509,49 @@ class FitnessRenderer:
 
 
 if __name__ == "__main__":
+    import traceback
+
     # Example usage: generate and render a maze.
     FPS = 10
+    TICKS_PER_GEN = 100  # Ticks simulated per generation before evolving.
+    WATCH_EVERY = 100  # Animate the maze every Nth generation; others run headless.
     maze = Maze(name="ExampleMaze", side_length_bits=6, seed=42)
     population = Population(size=100, AutomatonClass=MazeAutomaton, environment=maze)
     renderer = MazeRenderer(maze)
     fitness_renderer = FitnessRenderer()
     fitness_history_renderer = FitnessHistoryRenderer()
 
-    def _simulation_step():
-        import traceback
+    # The maze renderer is by far the most expensive part of a tick, so we only
+    # animate it once every WATCH_EVERY generations. The intervening generations
+    # are simulated "headless" (no per-tick maze rendering) as fast as possible.
+    # The fitness charts still update on every generation.
+    _state = {"generation": 0, "tick": 0, "watching": True}
 
+    def _finish_generation():
+        fitnesses = population.evolve()
+        fitness_renderer.update(fitnesses)
+        fitness_history_renderer.update(fitnesses)
+        _state["generation"] += 1
+        _state["tick"] = 0
+        _state["watching"] = _state["generation"] % WATCH_EVERY == 0
+
+    def _simulation_step():
         try:
-            population.tick()
-            renderer.render(population.automata[:20])
-            if population.tick_count % 50 == 0:  # Evolve every 50 ticks
-                fitnesses = population.evolve()
-                fitness_renderer.update(fitnesses)
-                fitness_history_renderer.update(fitnesses)
+            if _state["watching"]:
+                # Animate one tick per timer callback so behaviour is visible.
+                population.tick()
+                renderer.render(population.automata[:20])
+                _state["tick"] += 1
+                if _state["tick"] >= TICKS_PER_GEN:
+                    _finish_generation()
+            else:
+                # Burn through whole generations headless until the next watched
+                # generation, then hand back to the animation path above.
+                while not _state["watching"]:
+                    for _ in range(TICKS_PER_GEN):
+                        population.tick()
+                    _finish_generation()
+                renderer.render(population.automata[:20])
         except Exception:
             traceback.print_exc()
             _timer.stop()

@@ -215,20 +215,21 @@ class ParenthesisAutomaton(AutomatonISBase):
             self.environment, Parenthesis
         ), "ParenthesisAutomaton requires a Parenthesis environment."
 
-    def attempt_action(self, action: bytes) -> ActionStatus:
+    def attempt_action(self, action: int) -> ActionStatus:
         """Attempts to perform the action specified by the automaton's response.
 
         Args:
-            action (bytes): A byte string representing the action to be performed.
+            action (int): An integer representing the action to be performed.
         """
         assert isinstance(
             self.environment, Parenthesis
         ), "ParenthesisAutomaton requires a Parenthesis environment."
-        if int(action[0]) == self.environment._validation_state[self.coords[0]].value:
+        action &= self.resp_mask
+        if action == self.environment._validation_state[self.coords[0]].value:
             self.fitness += 1.0  # Reward for correct action
         else:
             self.fitness -= 1.0  # Penalty for incorrect action
-        if int(action[0]) == ParenthesisAction.INVALID.value:
+        if action == ParenthesisAction.INVALID.value:
             return ActionStatus.SUCCEEDED
         # In the case the sequence is valid or consistent, we can move to the next
         # token in the environment. For now, we assume all actions are successful.
@@ -244,14 +245,14 @@ class ParenthesisAutomaton(AutomatonISBase):
         super().reset()
         self.coords = [0]
 
-    def tick(self) -> bytes:
+    def tick(self) -> int:
         """Perform a tick of the automaton."""
         # super().tick() already updates internal_state and returns only the action bytes.
         action = super().tick()
         action_status = self.attempt_action(action)
         if action_status == ActionStatus.FAILED:
             self.last_action = ParenthesisAction.DONE.value
-            return self.last_action.to_bytes(1, "big")
+            return ParenthesisAction.DONE.value
         return action
 
 

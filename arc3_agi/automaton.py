@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from enum import IntEnum
 
+from arc3_agi.environment import Environment
 from arc3_agi.genetic_code import GeneticCodeDict
 
 
@@ -25,15 +26,46 @@ class AutomatonBase:
         """Initializes the automaton with a name and genetic code.
 
         Args:
-            name: The name of the automaton. Arbitrary string identifier.
-            genetic_code: The genetic code of the automaton.
+            environment: The environment the automaton interacts with.
+            genetic_code (optional): The genetic code of the automaton.
+            name (optional): The name of the automaton. Arbitrary string identifier.
         """
+        if "environment" not in kwargs:
+            raise ValueError("AutomatonBase requires 'environment' in kwargs.")
+        self.environment: Environment = kwargs["environment"]
         self.name = kwargs.get("name", "UnnamedAutomaton")
         self.genetic_code = kwargs.get("genetic_code", GeneticCodeDict({}))
-        self.coords: list[int] = []
+        self.coords: list[int] = []  # n-dimensional coordinates.
         self.fitness: float = 0.0
+        self.last_action: int = -1  # Last action taken.
 
-    def tick(self, environment: bytes) -> bytes:
+    def attempt_action(self, action: bytes) -> ActionStatus:
+        """Given an action byte string, attempt to perform the corresponding action.
+
+        The action is an attempt as the environment may not allow it (e.g. moving
+        into a wall). The automaton can use the result of the action to update its
+        internal state or make decisions in subsequent ticks.
+
+        This method is intended to be overridden by subclasses to define how the
+        automaton interacts with its environment based on the response generated
+        by the tick method.
+
+        Args:
+            action: A byte string representing the action to be taken.
+
+        Returns:
+            An ActionStatus enum value representing the result of the action.
+        """
+        self.last_action = int.from_bytes(action, byteorder="big")
+        return ActionStatus.SUCCEEDED
+
+    def reset(self) -> None:
+        """Resets the automaton's state and fitness."""
+        self.fitness = 0.0
+        self.coords = []
+        self.last_action = -1
+
+    def tick(self) -> bytes:
         """Given the current environment stimulus, compute the response.
 
         Args:
@@ -54,10 +86,10 @@ class AutomatonISBase(AutomatonBase):
 
         The genetic code input is required to be:
             [0:state_len] → internal state
-            [state_len:state_len+env_len] → environment stimulus
-        and the respnse:
-            [0:state_len] → new internal state
-            [state_len:state_len+resp_len] → response to environment
+            [state_len:] → environment stimulus
+        and the response:
+            [:resp_len] → response to environment
+            [resp_len:] → new internal state
         Args:
             name: The name of the automaton. Arbitrary string identifier.
             genetic_code: The genetic code of the automaton.
@@ -81,7 +113,12 @@ class AutomatonISBase(AutomatonBase):
         self.resp_bytes = (self.resp_bits + 7) >> 3
         self.internal_state: bytes = bytes(self.state_bytes)
 
-    def tick(self, environment: bytes) -> bytes:
+    def reset(self) -> None:
+        """Resets the automaton's internal state and fitness."""
+        super().reset()
+        self.internal_state = bytes(self.state_bytes)
+
+    def tick(self) -> bytes:
         """Given the current environment stimulus, compute the response and update internal state.
 
         Args:
@@ -90,29 +127,9 @@ class AutomatonISBase(AutomatonBase):
         Returns:
             A byte string representing the response of the automaton.
         """
-        input_code = self.internal_state + environment
+        input_code = self.internal_state + self.environment.get_local(self.coords)
         output_code = self.genetic_code[input_code]
-        self.internal_state = output_code[: self.state_bytes]
-        response = output_code[self.state_bytes :]
+        # NB: The output code is a byte string not an integer so the MSBs are the internal state.
+        self.internal_state = output_code[self.resp_bytes :]
+        response = output_code[: self.resp_bytes]
         return response
-
-    def attempt_action(self, action: bytes) -> ActionStatus:
-        """Given an action byte string, attempt to perform the corresponding action.
-
-        The action is an attempt as the environment may not allow it (e.g. moving
-        into a wall). The automaton can use the result of the action to update its
-        internal state or make decisions in subsequent ticks.
-
-        This method is intended to be overridden by subclasses to define how the
-        automaton interacts with its environment based on the response generated
-        by the tick method.
-
-        Args:
-            action: A byte string representing the action to be taken.
-
-        Returns:
-            An ActionStatus enum value representing the result of the action.
-        """
-        raise NotImplementedError(
-            "AutomatonISBase.attempt_action() must be implemented by subclasses."
-        )

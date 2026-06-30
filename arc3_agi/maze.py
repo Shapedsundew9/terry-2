@@ -17,6 +17,7 @@ from numpy.typing import NDArray
 from arc3_agi.automaton import ActionStatus, AutomatonISBase
 from arc3_agi.environment import LayeredStaticBoolean2DGrid, StaticBoolean2DGrid
 from arc3_agi.genetic_code import GeneticCode, GeneticCodeDict
+from arc3_agi.population import Population
 
 matplotlib.use("webagg")
 import matplotlib.pyplot as plt
@@ -212,7 +213,7 @@ class MazeAutomaton(AutomatonISBase):
             y: Initial y-coordinate (row) of the automaton in the maze. Default is 0.
             orientation: Initial orientation of the automaton. Should be an instance
                 of Maze.Orientation. Default is Maze.Orientation.UP.
-            maze: The Maze environment instance that the automaton will interact with.
+            environment: The Maze environment instance that the automaton will interact with.
                 This is required.
         """
         super().__init__(
@@ -221,19 +222,21 @@ class MazeAutomaton(AutomatonISBase):
             env_bits=9,
             state_bits=8,
             resp_bits=2,
+            environment=kwargs.get("environment"),
         )
         if self.genetic_code is None:
             self.genetic_code = GeneticCodeDict(
                 {}, resp_bits=(self.state_bytes + self.resp_bytes) << 3
             )
-        self.maze: Maze = kwargs["maze"]
-        fx, fy = self.maze.random_free_cell()
+        assert isinstance(
+            self.environment, Maze
+        ), "MazeAutomaton requires a Maze environment."
+        fx, fy = self.environment.random_free_cell()
         self.coords = [
             kwargs.get("x", fx),
             kwargs.get("y", fy),
             kwargs.get("orientation", Maze.Orientation.UP).value,
         ]
-        assert "maze" in kwargs, "MazeAutomaton requires 'maze' in kwargs."
 
         # Since automata do not interact in anyway, even through the environment
         # they each have a separate energy grid for tracking coverage and
@@ -247,7 +250,8 @@ class MazeAutomaton(AutomatonISBase):
         # explore the maze and find the goal.
         self.energy: int = 10  # Initial energy for the automaton; can be tuned.
         self.energy_grid: list[list[bool]] = [
-            [True for _ in range(self.maze.width)] for _ in range(self.maze.height)
+            [True for _ in range(self.environment.width)]
+            for _ in range(self.environment.height)
         ]
         self.fitness = 0.0
 
@@ -266,6 +270,7 @@ class MazeAutomaton(AutomatonISBase):
     def attempt_action(self, action: bytes) -> ActionStatus:
         """Perform the given action."""
         action_int = (action[0] if action else 0) & ((1 << self.resp_bits) - 1)
+        self.last_action = action_int
         match action_int:
             case 0:  # Move forward
                 move = Maze.orientation_moves[Maze.Orientation(self.coords[2])]
@@ -273,8 +278,11 @@ class MazeAutomaton(AutomatonISBase):
                 dy = move[1] + self.coords[1]
 
                 # Check for wall collision and bounds
-                if self.maze.is_wall(dx, dy):
-                    # NOTE: The maze is bordered by walls, so out-of-bounds
+                assert isinstance(
+                    self.environment, Maze
+                ), "MazeAutomaton requires a Maze environment."
+                if self.environment.is_wall(dx, dy):
+                    # NOTE: The environment is bordered by walls, so out-of-bounds
                     # is also a wall collision.
                     return ActionStatus.FAILED
 
@@ -288,10 +296,11 @@ class MazeAutomaton(AutomatonISBase):
                 self.energy += energy * 2  # Gain energy for moving into a new cell.
                 self.energy_grid[y][x] = False
 
+                # NOTE: Ignoring a goal for now.
                 # Is it the goal?
-                if self.maze.is_goal(x, y):
-                    self.fitness += 100.0  # Big fitness boost for reaching the goal.
-                    self.energy += 50  # Bonus energy for reaching the goal
+                # if self.environment.is_goal(x, y):
+                #    self.fitness += 100.0  # Big fitness boost for reaching the goal.
+                #    self.energy += 50  # Bonus energy for reaching the goal
 
                 self.coords[0] = x
                 self.coords[1] = y
@@ -305,10 +314,25 @@ class MazeAutomaton(AutomatonISBase):
             case _:
                 return ActionStatus.INVALID
 
-    def tick(self, environment: bytes) -> bytes:
+    def reset(self) -> None:
+        """Resets the automaton's state, energy, and fitness."""
+        super().reset()
+        assert isinstance(
+            self.environment, Maze
+        ), "MazeAutomaton requires a Maze environment."
+        fx, fy = self.environment.random_free_cell()
+        self.coords = [fx, fy, Maze.Orientation.UP.value]
+        self.energy = 10  # Reset energy to initial value.
+        self.energy_grid = [
+            [True for _ in range(self.environment.width)]
+            for _ in range(self.environment.height)
+        ]
+        self.fitness = 0.0
+
+    def tick(self) -> bytes:
         """Perform a tick of the automaton."""
         # super().tick() already updates internal_state and returns only the action bytes.
-        action = super().tick(environment)
+        action = super().tick()
         self.energy -= 1  # Each tick costs 1 energy; can be tuned.
         self.attempt_action(action)
         return action
@@ -450,13 +474,7 @@ if __name__ == "__main__":
     # Example usage: generate and render a maze.
     FPS = 10
     maze = Maze(name="ExampleMaze", side_length_bits=6, seed=42)
-    automata = [
-        MazeAutomaton(
-            name=f"Automaton{i}",
-            maze=maze,
-        )
-        for i in range(50)
-    ]
+    population = Population(size=100, AutomatonClass=MazeAutomaton, environment=maze)
     renderer = MazeRenderer(maze)
     fitness_renderer = FitnessRenderer()
 
@@ -464,11 +482,10 @@ if __name__ == "__main__":
         import traceback
 
         try:
-            for automaton in automata:
-                automaton.tick(maze.get_local(automaton.coords))
-            fitnesses = [a.fitness for a in automata]
-            fitness_renderer.update(fitnesses)
-            renderer.render(automata[:25])
+            population.tick()
+            renderer.render(population.automata[:20])
+            if population.tick_count % 50 == 0:  # Evolve every 50 ticks
+                fitness_renderer.update(population.evolve())
         except Exception:
             traceback.print_exc()
             _timer.stop()

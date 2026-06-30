@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from abc import abstractmethod
 from collections.abc import Mapping, MutableMapping
-from random import Random, randrange
+from random import Random, randint, randrange
 from typing import Iterator, Self, Sequence
 
 
@@ -29,7 +29,7 @@ class GeneticCode(MutableMapping[bytes, bytes]):
         self.resp_bits = resp_bits
         self.resp_bytes = (resp_bits + 7) >> 3
 
-    def crossover(self, other: GeneticCode) -> Self:
+    def crossover(self, other: GeneticCode, mutation_rate: float = 0.01) -> Self:
         """Performs a crossover between this genetic code and another, producing a new genetic
         code that combines elements of both parents. The crossover point is randomly
         selected, and the resulting code is a combination of the two parent codes.
@@ -43,6 +43,11 @@ class GeneticCode(MutableMapping[bytes, bytes]):
                 child[key] = self[key]
             else:
                 child[key] = self[key] if self._rng.randrange(2) == 0 else other[key]
+            if self._rng.random() < mutation_rate:
+                # TODO: Would be easier if keys and values were ints
+                mutate_mask = 1 << self._rng.randrange(self.resp_bits)
+                mutated_value = int.from_bytes(child[key], "big") ^ mutate_mask
+                child[key] = mutated_value.to_bytes(self.resp_bytes, "big")
         return self.__class__(
             child, seed=self._rng.randint(0, 2**32 - 1), resp_bits=self.resp_bits
         )
@@ -61,6 +66,7 @@ class GeneticCodeDict(GeneticCode):
     ) -> None:
         super().__init__(code, seed, resp_bits)
         if isinstance(code, Mapping):
+            # Copy if the code is a mapping to avoid mutating the original
             self._code: dict[bytes, bytes] = dict(code)
         else:
             num_bytes = (len(code) >> 8) + 1

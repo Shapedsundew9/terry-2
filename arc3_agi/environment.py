@@ -3,8 +3,6 @@ from copy import deepcopy
 from enum import IntEnum
 from typing import Any
 
-from arc3_agi.automaton import ActionStatus, AutomatonBase
-
 
 class Environment:
     def __init__(self, name: str, **kwargs) -> None:
@@ -32,6 +30,65 @@ class Environment:
     def set_local(self, coords: list[int], **kwargs) -> None:
         """Sets the local environment at the given coordinates to the provided value."""
         raise NotImplementedError("set_local method must be implemented by subclasses")
+
+
+class Int1DArray(Environment):
+    def __init__(self, name: str, **kwargs) -> None:
+        """Initializes a 1D array environment where each element is an integer.
+
+        Args:
+            name: The name of the environment
+            description: An optional description of the environment.
+            array: A list of integers representing the state of the array. This will be set immediately and cannot be modified later.
+        """
+        super().__init__(
+            name,
+            description=kwargs.get(
+                "description",
+                "A 1D array environment where each element is an integer.",
+            ),
+        )
+        self._array: list[int] = kwargs.get("array", [])
+
+    def get(self) -> list[int]:
+        """Returns the entire 1D array as a list of integers."""
+        return self._array
+
+    def get_local(self, coords: list[int], **kwargs) -> bytes:
+        """Returns a bitstring representing the local environment around the
+        given coordinates. This implementation ignores the radius, border_value, and wrap
+        parameters since they are fixed at initialization.
+
+        Args:
+            coords: A list of [x] coordinates for the center of the local environment
+
+        Returns:
+            A big endian bytes object representing the local environment as a bitstring, where
+            each bit MSb to LSb corresponds to a cell in the local area, ordered from left to right.
+        """
+        x = coords[0]
+        if 0 <= x < len(self._array):
+            return self._array[x].to_bytes(8, byteorder="big", signed=True)
+        else:
+            raise IndexError("Coordinates out of bounds for Int1DArray.")
+
+    def set(self, new_array: list[int]) -> None:
+        """Sets the entire 1D array to the provided array. The input should be a list of integers."""
+        self._array = deepcopy(new_array)
+
+    def set_local(self, coords: list[int], **kwargs) -> None:
+        """Sets the local environment around the given coordinates to the provided value.
+        This implementation ignores the radius, border_value, and wrap parameters since they are fixed at initialization.
+
+        Args:
+            coords: A list of [x] coordinates for the center of the local environment
+            value: The integer value to set for the local environment (default: 0)
+        """
+        x = coords[0]
+        if 0 <= x < len(self._array):
+            self._array[x] = kwargs.get("value", 0)
+        else:
+            raise IndexError("Coordinates out of bounds for Int1DArray.")
 
 
 class Boolean2DGrid(Environment):

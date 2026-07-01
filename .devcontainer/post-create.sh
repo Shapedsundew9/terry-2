@@ -7,7 +7,7 @@ set -e
 echo "--- Running post-create script ---"
 sudo apt update -y
 sudo apt upgrade -y
-sudo apt install -y ripgrep vim python3.13-venv python3-pip
+sudo apt install -y ripgrep vim python3.13-venv python3-pip docker.io
 
 # Install anti-gravity
 if [ ! -f /home/vscode/.local/bin/agy ]; then

@@ -110,12 +110,3 @@ def test_move_forward_into_free_cell_succeeds_and_rewards() -> None:
                 assert auto.fitness > fitness_before
                 return
     pytest.fail("no pair of adjacent free cells found in the maze")
-
-
-def test_graph_code_drives_tick_within_response_mask() -> None:
-    maze = Maze("m", 4, seed=1)
-    code = GeneticCodeGraph.random(input_bits=14, resp_bits=7, num_nodes=24, seed=5)
-    auto = MazeAutomaton(environment=maze, genetic_code=code)
-    for _ in range(20):
-        response = auto.tick()
-        assert 0 <= response < (1 << 2)

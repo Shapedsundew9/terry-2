@@ -26,7 +26,8 @@
                 "ms-python.debugpy",
                 "ms-python.black-formatter",
                 "ms-python.vscode-pylance",
-                "ms-python.isort"
+                "ms-python.isort",
+                "ms-azuretools.vscode-containers"
             ],
             "settings": {
                 "editor.formatOnSave": true,
@@ -87,5 +88,8 @@
             "ARC_AGI_API": "${localEnv:ARC_AGI_API}",
             "ARC_API_KEY": "${localEnv:ARC_AGI_API}"
         }
-    }
+    },
+    "mounts": [
+        "source=/tmp,target=/workspaces/tmp,type=bind,consistency=cached"
+    ]
 }

@@ -215,3 +215,4 @@ __marimo__/
 
 # ARC3-AGI
 environment_files/
+*.pdf

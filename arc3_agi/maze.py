@@ -226,11 +226,14 @@ class MazeAutomaton(AutomatonISBase):
             environment=kwargs.get("environment"),
         )
         if self.genetic_code is None:
-            self.genetic_code = GeneticCodeGraph(
-                num_nodes=64,
-                input_bits=self.env_bits + self.state_bits,
-                resp_bits=self.state_bits + self.resp_bits,
+            self.genetic_code = GeneticCodeDict(
+                {}, resp_bits=self.state_bits + self.resp_bits
             )
+        #    self.genetic_code = GeneticCodeDict(
+        #        num_nodes=64,
+        #        input_bits=self.env_bits + self.state_bits,
+        #        resp_bits=self.state_bits + self.resp_bits,
+        #    )
         assert isinstance(
             self.environment, Maze
         ), "MazeAutomaton requires a Maze environment."

@@ -5,7 +5,7 @@ import random
 import pytest
 
 from arc3_agi.automaton import ActionStatus
-from arc3_agi.genetic_code import GeneticCodeDict, GeneticCodeGraph
+from arc3_agi.genetic_code import GeneticCodeDict
 from arc3_agi.parethesis import (
     Parenthesis,
     ParenthesisAction,
@@ -124,9 +124,9 @@ def test_tick_reports_done_at_end_of_sequence() -> None:
     assert auto.last_action == ParenthesisAction.DONE.value
 
 
-def test_graph_code_drives_tick_within_response_mask() -> None:
+def test_dict_code_drives_tick_within_response_mask() -> None:
     env = _fixed_env([OPEN, CLOSE, OPEN, CLOSE])
-    code = GeneticCodeGraph.random(input_bits=16, resp_bits=10, num_nodes=24, seed=11)
+    code = GeneticCodeDict({}, seed=11, resp_bits=10)
     auto = ParenthesisAutomaton(environment=env, genetic_code=code)
     for _ in range(10):
         result = auto.tick()

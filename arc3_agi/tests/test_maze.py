@@ -4,7 +4,6 @@ import numpy as np
 import pytest
 
 from arc3_agi.automaton import ActionStatus
-from arc3_agi.genetic_code import GeneticCodeGraph
 from arc3_agi.maze import Maze, MazeAutomaton, generate_maze
 
 ORIENTATION_DELTAS = {

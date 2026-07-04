@@ -16,7 +16,7 @@ from numpy.typing import NDArray
 
 from arc3_agi.automaton import ActionStatus, AutomatonISBase
 from arc3_agi.environment import LayeredStaticBoolean2DGrid, StaticBoolean2DGrid
-from arc3_agi.genetic_code import GeneticCode, GeneticCodeDict, GeneticCodeGraph
+from arc3_agi.genetic_code import GeneticCode, GeneticCodeDict
 from arc3_agi.population import Population
 
 matplotlib.use("webagg")

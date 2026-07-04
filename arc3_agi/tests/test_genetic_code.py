@@ -1,10 +1,8 @@
 """Tests for the GeneticCode implementations.
 
-The cross-implementation tests assert that ``GeneticCodeDict``,
-``GeneticCodeList`` and ``GeneticCodeGraph`` all honour the same contract so the
-new graph-based code interacts with the rest of the system identically to the
-existing table-based codes. Implementation-specific behaviour (the logic graph
-in particular) is covered by the dedicated sections below.
+The cross-implementation tests assert that ``GeneticCodeDict`` and
+``GeneticCodeList`` both honour the same contract. Implementation-specific
+behaviour is covered by the dedicated sections below.
 """
 
 import random
@@ -14,7 +12,6 @@ import pytest
 from arc3_agi.genetic_code import (
     GeneticCode,
     GeneticCodeDict,
-    GeneticCodeGraph,
     GeneticCodeList,
 )
 
@@ -31,14 +28,10 @@ def make_code(impl: str, seed: int) -> GeneticCode:
         rng = random.Random(seed)
         values = [rng.getrandbits(RESP_BITS) for _ in range(len(SAMPLE_KEYS))]
         return GeneticCodeList(values, seed=seed, resp_bits=RESP_BITS)
-    if impl == "graph":
-        return GeneticCodeGraph.random(
-            input_bits=6, resp_bits=RESP_BITS, num_nodes=20, seed=seed
-        )
     raise ValueError(impl)
 
 
-@pytest.fixture(params=["dict", "list", "graph"])
+@pytest.fixture(params=["dict", "list"])
 def impl(request) -> str:
     return request.param
 
@@ -95,63 +88,3 @@ def test_list_indexes_directly() -> None:
     assert code[1] == 1
     assert code[2] == 2
     assert len(code) == 3
-
-
-# --------------------------------------------------------------------------- #
-# GeneticCodeGraph specifics
-# --------------------------------------------------------------------------- #
-def test_graph_ignores_bits_above_input_width() -> None:
-    code = GeneticCodeGraph.random(input_bits=8, resp_bits=5, num_nodes=16, seed=4)
-    for key in range(256):
-        assert code[key] == code[key + (1 << 8)]
-
-
-def test_graph_is_not_constant() -> None:
-    code = GeneticCodeGraph.random(input_bits=8, resp_bits=5, num_nodes=24, seed=3)
-    outputs = {code[k] for k in range(256)}
-    assert len(outputs) > 1
-
-
-def test_graph_genome_round_trips() -> None:
-    code = GeneticCodeGraph.random(input_bits=8, resp_bits=5, num_nodes=16, seed=6)
-    clone = GeneticCodeGraph(tuple(code._nodes), resp_bits=5, input_bits=8)
-    for key in range(256):
-        assert code[key] == clone[key]
-
-
-def test_graph_zero_mutation_self_crossover_is_identity() -> None:
-    code = GeneticCodeGraph.random(input_bits=8, resp_bits=5, num_nodes=16, seed=7)
-    child = code.crossover(code, mutation_rate=0.0)
-    for key in range(256):
-        assert child[key] == code[key]
-
-
-def test_graph_mutation_changes_some_output() -> None:
-    code = GeneticCodeGraph.random(input_bits=8, resp_bits=5, num_nodes=24, seed=8)
-    mutated = code.crossover(code, mutation_rate=0.9)
-    assert any(mutated[k] != code[k] for k in range(256))
-
-
-def test_graph_crossover_rejects_other_implementations() -> None:
-    graph = GeneticCodeGraph.random(input_bits=8, resp_bits=5, num_nodes=16, seed=9)
-    with pytest.raises(AssertionError):
-        graph.crossover(GeneticCodeDict({}, resp_bits=5))
-
-
-def test_graph_crossover_requires_matching_shape() -> None:
-    a = GeneticCodeGraph.random(input_bits=8, resp_bits=5, num_nodes=16, seed=1)
-    b = GeneticCodeGraph.random(input_bits=8, resp_bits=5, num_nodes=20, seed=1)
-    with pytest.raises(AssertionError):
-        a.crossover(b)
-
-
-def test_graph_mutators_are_not_supported() -> None:
-    code = GeneticCodeGraph.random(input_bits=8, resp_bits=5, num_nodes=16, seed=1)
-    with pytest.raises(NotImplementedError):
-        code[0] = 1
-    with pytest.raises(NotImplementedError):
-        del code[0]
-    with pytest.raises(NotImplementedError):
-        iter(code)
-    with pytest.raises(NotImplementedError):
-        len(code)

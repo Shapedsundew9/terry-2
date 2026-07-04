@@ -1,9 +1,10 @@
 from enum import IntEnum
 from operator import is_
 from signal import SIGINT, signal
-from typing import Optional
+from typing import Any, Optional
 
 import matplotlib
+import numpy as np
 from numpy import (
     argwhere,
     array,
@@ -15,8 +16,9 @@ from numpy.random import default_rng
 from numpy.typing import NDArray
 
 from arc3_agi.automaton import ActionStatus, AutomatonISBase
+from arc3_agi.checkpoint import CheckpointConfig
 from arc3_agi.environment import LayeredStaticBoolean2DGrid, StaticBoolean2DGrid
-from arc3_agi.genetic_code import GeneticCode, GeneticCodeDict
+from arc3_agi.genetic_code import GeneticCodeDict
 from arc3_agi.population import Population
 
 matplotlib.use("webagg")
@@ -335,6 +337,32 @@ class MazeAutomaton(AutomatonISBase):
         )
         self.fitness = 0.0
 
+    # ------------------------------------------------------------------
+    # Checkpoint interface
+    # ------------------------------------------------------------------
+
+    def to_dict(self) -> dict:
+        d = super().to_dict()
+        d["automaton"]["energy"] = self.energy
+        return d
+
+    def to_arrays(self) -> dict:
+        arrays = super().to_arrays()
+        arrays["energy_grid"] = np.frombuffer(self.energy_grid, dtype=np.uint8).copy()
+        return arrays
+
+    @classmethod
+    def from_dict(cls, d, arrays, **kwargs):
+        inst = super().from_dict(d, arrays, **kwargs)
+        assert isinstance(
+            inst, MazeAutomaton
+        ), "from_dict did not return a MazeAutomaton instance."
+        inst.energy = d["automaton"]["energy"]
+        inst.energy_grid = bytearray(arrays["energy_grid"].tobytes())
+        assert isinstance(inst.environment, Maze)
+        inst._grid_width = inst.environment.width
+        return inst
+
     def tick(self) -> int:
         """Perform a tick of the automaton."""
         # super().tick() already updates internal_state and returns only the action bytes.
@@ -519,9 +547,14 @@ if __name__ == "__main__":
     # Example usage: generate and render a maze.
     FPS = 10
     TICKS_PER_GEN = 100  # Ticks simulated per generation before evolving.
-    WATCH_EVERY = 100  # Animate the maze every Nth generation; others run headless.
+    WATCH_EVERY = 10  # Animate the maze every Nth generation; others run headless.
     maze = Maze(name="ExampleMaze", side_length_bits=6, seed=42)
-    population = Population(size=100, AutomatonClass=MazeAutomaton, environment=maze)
+    population = Population(
+        size=100,
+        AutomatonClass=MazeAutomaton,
+        environment=maze,
+        checkpoint_config=CheckpointConfig(generation_interval=WATCH_EVERY),
+    )
     renderer = MazeRenderer(maze)
     fitness_renderer = FitnessRenderer()
     fitness_history_renderer = FitnessHistoryRenderer()

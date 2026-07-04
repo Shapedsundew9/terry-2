@@ -4,10 +4,14 @@ from abc import abstractmethod
 from collections.abc import Mapping, MutableMapping
 from math import log
 from random import Random, randint, randrange
-from typing import Iterator, Self, Sequence
+from typing import Any, Iterator, Self, Sequence
+
+import numpy as np
+
+from arc3_agi.checkpoint import SCHEMA_VERSION, Checkpointable
 
 
-class GeneticCode(MutableMapping[int, int]):
+class GeneticCode(MutableMapping[int, int], Checkpointable):
     """Represents the genetic code for an automaton species.
 
     The genetic code simply maps input state to output state and provides some
@@ -131,6 +135,34 @@ class GeneticCodeDict(GeneticCode):
     def __len__(self) -> int:
         return len(self._code)
 
+    # ------------------------------------------------------------------
+    # Checkpoint interface
+    # ------------------------------------------------------------------
+
+    def to_dict(self) -> dict[str, Any]:
+        d: dict[str, Any] = {
+            "type": "GeneticCodeDict",
+            "schema_version": SCHEMA_VERSION,
+            "resp_bits": self.resp_bits,
+        }
+        if self._seed is not None:
+            d["seed"] = self._seed
+        return d
+
+    def to_arrays(self) -> dict[str, np.ndarray]:
+        keys = np.array(list(self._code.keys()), dtype=np.int64)
+        values = np.array(list(self._code.values()), dtype=np.int64)
+        return {"keys": keys, "values": values}
+
+    @classmethod
+    def from_dict(
+        cls, d: dict[str, Any], arrays: dict[str, np.ndarray], **kwargs: Any
+    ) -> GeneticCodeDict:
+        keys: list[int] = arrays["keys"].tolist()
+        values: list[int] = arrays["values"].tolist()
+        code = dict(zip(keys, values))
+        return cls(code, seed=d.get("seed"), resp_bits=d.get("resp_bits", 1))
+
 
 class GeneticCodeList(GeneticCode):
     """A simple implementation of the GeneticCode interface using a list as the underlying
@@ -171,3 +203,27 @@ class GeneticCodeList(GeneticCode):
 
     def __len__(self) -> int:
         return len(self._code)
+
+    # ------------------------------------------------------------------
+    # Checkpoint interface
+    # ------------------------------------------------------------------
+
+    def to_dict(self) -> dict[str, Any]:
+        d: dict[str, Any] = {
+            "type": "GeneticCodeList",
+            "schema_version": SCHEMA_VERSION,
+            "resp_bits": self.resp_bits,
+        }
+        if self._seed is not None:
+            d["seed"] = self._seed
+        return d
+
+    def to_arrays(self) -> dict[str, np.ndarray]:
+        return {"values": np.array(self._code, dtype=np.int64)}
+
+    @classmethod
+    def from_dict(
+        cls, d: dict[str, Any], arrays: dict[str, np.ndarray], **kwargs: Any
+    ) -> GeneticCodeList:
+        values: list[int] = arrays["values"].tolist()
+        return cls(values, seed=d.get("seed"), resp_bits=d.get("resp_bits", 1))

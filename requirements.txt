@@ -6,3 +6,5 @@ arc-agi
 fastapi
 uvicorn
 matplotlib
+tomli-w
+tomli

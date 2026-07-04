@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 from enum import IntEnum
+from typing import Any
 
+import numpy as np
+
+from arc3_agi.checkpoint import SCHEMA_VERSION, Checkpointable, genetic_code_from_dict
 from arc3_agi.environment import Environment
-from arc3_agi.genetic_code import GeneticCodeDict
+from arc3_agi.genetic_code import GeneticCode, GeneticCodeDict
 
 
 class ActionStatus(IntEnum):
@@ -15,7 +19,7 @@ class ActionStatus(IntEnum):
     INVALID = 3  # The action was invalid. (Should never happen)
 
 
-class AutomatonBase:
+class AutomatonBase(Checkpointable):
     """Base class for an automaton that interacts with an environment.
 
     The base class automaton contains no dynamic state so it does not learn or
@@ -64,6 +68,62 @@ class AutomatonBase:
         self.fitness = 0.0
         self.coords = []
         self.last_action = -1
+
+    # ------------------------------------------------------------------
+    # Checkpoint interface
+    # ------------------------------------------------------------------
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "meta": {
+                "class": type(self).__name__,
+                "schema_version": SCHEMA_VERSION,
+            },
+            "environment": {
+                "class": type(self.environment).__name__,
+                "name": self.environment.name,
+            },
+            "automaton": {
+                "name": self.name,
+                "fitness": self.fitness,
+                "coords": list(self.coords),
+                "last_action": self.last_action,
+            },
+            "genetic_code": self.genetic_code.to_dict(),
+        }
+
+    def to_arrays(self) -> dict[str, np.ndarray]:
+        return self.genetic_code.to_arrays()
+
+    @classmethod
+    def from_dict(
+        cls,
+        d: dict[str, Any],
+        arrays: dict[str, np.ndarray],
+        **kwargs: Any,
+    ) -> AutomatonBase:
+        environment: Environment = kwargs["environment"]
+        env_info = d["environment"]
+        if (
+            env_info["class"] != type(environment).__name__
+            or env_info["name"] != environment.name
+        ):
+            raise ValueError(
+                f"Environment mismatch: checkpoint has "
+                f"{env_info['class']}/{env_info['name']!r} but received "
+                f"{type(environment).__name__}/{environment.name!r}."
+            )
+        genetic_code = genetic_code_from_dict(d["genetic_code"], arrays)
+        a_data = d["automaton"]
+        # Pass constructor-relevant fields from saved data (e.g. env_bits/state_bits
+        # for ISBase subclasses). Exclude runtime fields restored separately.
+        _post_init = {"fitness", "coords", "last_action", "internal_state", "energy"}
+        ctor_kwargs = {k: v for k, v in a_data.items() if k not in _post_init}
+        inst = cls(environment=environment, genetic_code=genetic_code, **ctor_kwargs)
+        inst.fitness = a_data["fitness"]
+        inst.coords = list(a_data["coords"])
+        inst.last_action = a_data["last_action"]
+        return inst
 
     def tick(self) -> int:
         """Given the current environment stimulus, compute the response.
@@ -117,6 +177,34 @@ class AutomatonISBase(AutomatonBase):
         """Resets the automaton's internal state and fitness."""
         super().reset()
         self.internal_state = 0
+
+    # ------------------------------------------------------------------
+    # Checkpoint interface
+    # ------------------------------------------------------------------
+
+    def to_dict(self) -> dict[str, Any]:
+        d = super().to_dict()
+        d["automaton"].update(
+            {
+                "env_bits": self.env_bits,
+                "state_bits": self.state_bits,
+                "resp_bits": self.resp_bits,
+                "internal_state": self.internal_state,
+            }
+        )
+        return d
+
+    @classmethod
+    def from_dict(
+        cls,
+        d: dict[str, Any],
+        arrays: dict[str, np.ndarray],
+        **kwargs: Any,
+    ) -> AutomatonISBase:
+        inst = super().from_dict(d, arrays, **kwargs)
+        a_data = d["automaton"]
+        inst.internal_state = a_data["internal_state"]
+        return inst
 
     def tick(self) -> int:
         """Given the current environment stimulus, compute the response and update internal state.

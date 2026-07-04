@@ -355,6 +355,9 @@ class LayeredStaticBoolean2DGrid(Environment):
             wrap: Whether to wrap around the edges of the grid in get_local (default: False)
             num_layers: The number of layers in the grid (the bit width of the integers in the grid).
         """
+        super().__init__(
+            name, **{k: v for k, v in kwargs.items() if k == "description"}
+        )
         self._grid: list[list[int]] = kwargs.get("grid", [])
         num_layers: int = kwargs.get("num_layers", 1)
         if self._grid:

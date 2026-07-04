@@ -29,6 +29,7 @@ class Population(Checkpointable):
         self.tick_count: int = 0
         self.generation: int = 0
         self.fitness_history: list[dict[str, Any]] = []
+        self._gen_start_time: datetime.datetime = datetime.datetime.now()
         self.checkpoint_config = (
             checkpoint_config if checkpoint_config is not None else CheckpointConfig()
         )
@@ -83,12 +84,15 @@ class Population(Checkpointable):
 
         # Record fitness statistics for this generation.
         self.generation += 1
+        _now = datetime.datetime.now()
+        duration_s = (_now - self._gen_start_time).total_seconds()
         self.fitness_history.append(
             {
                 "generation": self.generation,
                 "min_fitness": min(fitnesses),
                 "max_fitness": max(fitnesses),
                 "mean_fitness": sum(fitnesses) / len(fitnesses),
+                "duration_s": duration_s,
                 "fitnesses": fitnesses,
             }
         )
@@ -96,6 +100,8 @@ class Population(Checkpointable):
         self.automata[len(self.automata) // 2 :] = offspring
         for a in self.automata:
             a.reset()
+
+        self._gen_start_time = _now
 
         if (
             self.checkpoint_config.enabled
@@ -139,6 +145,7 @@ class Population(Checkpointable):
                     "min_fitness": e["min_fitness"],
                     "max_fitness": e["max_fitness"],
                     "mean_fitness": e["mean_fitness"],
+                    "duration_s": e["duration_s"],
                 }
                 for e in self.fitness_history
             ],
@@ -196,11 +203,13 @@ class Population(Checkpointable):
         pop.fitness_history = [
             {
                 **entry,
+                "duration_s": entry.get("duration_s", None),
                 "fitnesses": (fh_arrays[i].tolist() if fh_arrays is not None else []),
             }
             for i, entry in enumerate(history_meta)
         ]
         pop.checkpoint_config = cfg
+        pop._gen_start_time = datetime.datetime.now()
 
         # Create a fresh run dir for the resumed run.
         if cfg.enabled:

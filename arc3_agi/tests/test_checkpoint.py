@@ -289,6 +289,8 @@ def test_population_round_trip(tmp_path: Path, maze: Maze) -> None:
     for entry in restored.fitness_history:
         assert len(entry["fitnesses"]) == 4
         assert all(math.isfinite(f) for f in entry["fitnesses"])
+        assert entry["duration_s"] is not None
+        assert math.isfinite(entry["duration_s"])
     # Verify automata were reconstructed (energy_grid size matches).
     for a in restored.automata:
         assert len(a.energy_grid) == maze.width * maze.height
@@ -378,6 +380,8 @@ def test_fitness_history_accumulated(maze: Maze) -> None:
         assert math.isfinite(entry["min_fitness"])
         assert math.isfinite(entry["max_fitness"])
         assert math.isfinite(entry["mean_fitness"])
+        assert entry["duration_s"] is not None
+        assert math.isfinite(entry["duration_s"])
         assert len(entry["fitnesses"]) == 4
 
 

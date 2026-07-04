@@ -390,6 +390,21 @@ class MazeAutomaton(AutomatonISBase):
         return action
 
 
+def _moving_average(data: list[float], window: int) -> list[float]:
+    """Return a simple moving average of *data* with the given *window*.
+
+    Positions where fewer than *window* values are available are filled with
+    ``float("nan")`` so they are invisible on a matplotlib plot.
+    """
+    result: list[float] = []
+    for i in range(len(data)):
+        if i + 1 < window:
+            result.append(float("nan"))
+        else:
+            result.append(sum(data[i + 1 - window : i + 1]) / window)
+    return result
+
+
 class MazeRenderer:
     """Simple matplotlib renderer for the Maze environment."""
 
@@ -480,7 +495,8 @@ class MazeRenderer:
 class FitnessHistoryRenderer:
     """Live line chart showing mean and max fitness per generation."""
 
-    def __init__(self) -> None:
+    def __init__(self, window: int = 10) -> None:
+        self._window = window
         self.fig, self.ax = plt.subplots(figsize=(6, 4))
         if self.fig.canvas.manager is not None:
             self.fig.canvas.manager.set_window_title("Fitness History")
@@ -497,9 +513,29 @@ class FitnessHistoryRenderer:
         self._means.append(sum(fitnesses) / len(fitnesses))
         self._maxes.append(max(fitnesses))
         gens = list(range(1, len(self._means) + 1))
+        ma_means = _moving_average(self._means, self._window)
+        ma_maxes = _moving_average(self._maxes, self._window)
         self.ax.cla()
         self.ax.plot(gens, self._means, color="crimson", linewidth=1.5, label="mean")
+        self.ax.plot(
+            gens,
+            ma_means,
+            color="crimson",
+            linewidth=1.5,
+            linestyle="--",
+            alpha=0.7,
+            label=f"mean MA-{self._window}",
+        )
         self.ax.plot(gens, self._maxes, color="steelblue", linewidth=1.5, label="max")
+        self.ax.plot(
+            gens,
+            ma_maxes,
+            color="steelblue",
+            linewidth=1.5,
+            linestyle="--",
+            alpha=0.7,
+            label=f"max MA-{self._window}",
+        )
         self.ax.set_xlabel("Generation")
         self.ax.set_ylabel("Fitness")
         self.ax.set_title("Fitness History")
@@ -559,6 +595,119 @@ class FitnessRenderer:
         plt.close(self.fig)
 
 
+class GenerationsPerSecondRenderer:
+    """Live line chart showing generations per second over time, with a moving average trend line."""
+
+    def __init__(self, window: int = 10) -> None:
+        self._window = window
+        self._rates: list[float] = []
+        self.fig, self.ax = plt.subplots(figsize=(6, 4))
+        if self.fig.canvas.manager is not None:
+            self.fig.canvas.manager.set_window_title("Generations per Second")
+        self.ax.set_xlabel("Generation")
+        self.ax.set_ylabel("Generations / s")
+        self.ax.set_title("Generations per Second")
+        self.fig.tight_layout()
+        self.fig.canvas.draw()
+        self.fig.canvas.flush_events()
+
+    def update(self, duration_s: float | None) -> None:
+        if duration_s is None or duration_s <= 0.0:
+            return
+        self._rates.append(1.0 / duration_s)
+        gens = list(range(1, len(self._rates) + 1))
+        ma = _moving_average(self._rates, self._window)
+        self.ax.cla()
+        self.ax.plot(
+            gens, self._rates, color="steelblue", linewidth=1.5, label="gens/s"
+        )
+        self.ax.plot(
+            gens,
+            ma,
+            color="steelblue",
+            linewidth=1.5,
+            linestyle="--",
+            alpha=0.7,
+            label=f"MA-{self._window}",
+        )
+        self.ax.set_xlabel("Generation")
+        self.ax.set_ylabel("Generations / s")
+        self.ax.set_title("Generations per Second")
+        self.ax.legend()
+        self.fig.tight_layout()
+        self.fig.canvas.draw_idle()
+
+    def is_open(self) -> bool:
+        return plt.fignum_exists(self.fig.number)
+
+    def close(self) -> None:
+        plt.close(self.fig)
+
+
+class FitnessRateRenderer:
+    """Live chart showing the per-generation rate of change of max and mean fitness, with moving average trend lines."""
+
+    def __init__(self, window: int = 100) -> None:
+        self._window = window
+        self._prev_max: float | None = None
+        self._prev_mean: float | None = None
+        self._delta_maxes: list[float] = []
+        self._delta_means: list[float] = []
+        self.fig, self.ax = plt.subplots(figsize=(6, 4))
+        if self.fig.canvas.manager is not None:
+            self.fig.canvas.manager.set_window_title("Fitness Rate of Change")
+        self.ax.set_xlabel("Generation")
+        self.ax.set_ylabel("\u0394 Fitness")
+        self.ax.set_title("Fitness Rate of Change")
+        self.fig.tight_layout()
+        self.fig.canvas.draw()
+        self.fig.canvas.flush_events()
+
+    def update(self, fitnesses: list[float]) -> None:
+        cur_max = max(fitnesses)
+        cur_mean = sum(fitnesses) / len(fitnesses)
+        if self._prev_max is None:
+            self._delta_maxes.append(float("nan"))
+            self._delta_means.append(float("nan"))
+        else:
+            self._delta_maxes.append(cur_max - self._prev_max)
+            self._delta_means.append(cur_mean - self._prev_mean)  # type: ignore[operator]
+        self._prev_max = cur_max
+        self._prev_mean = cur_mean
+
+        gens = list(range(1, len(self._delta_maxes) + 1))
+        ma_max = _moving_average(self._delta_maxes, self._window)
+        ma_mean = _moving_average(self._delta_means, self._window)
+        self.ax.cla()
+        self.ax.plot(
+            gens,
+            ma_max,
+            color="steelblue",
+            linewidth=1.5,
+            label=f"\u0394 max MA-{self._window}",
+        )
+        self.ax.plot(
+            gens,
+            ma_mean,
+            color="crimson",
+            linewidth=1.5,
+            label=f"\u0394 mean MA-{self._window}",
+        )
+        self.ax.axhline(0, color="gray", linewidth=0.8, linestyle=":")
+        self.ax.set_xlabel("Generation")
+        self.ax.set_ylabel("\u0394 Fitness")
+        self.ax.set_title("Fitness Rate of Change")
+        self.ax.legend()
+        self.fig.tight_layout()
+        self.fig.canvas.draw_idle()
+
+    def is_open(self) -> bool:
+        return plt.fignum_exists(self.fig.number)
+
+    def close(self) -> None:
+        plt.close(self.fig)
+
+
 if __name__ == "__main__":
     import traceback
 
@@ -576,6 +725,8 @@ if __name__ == "__main__":
     renderer = MazeRenderer(maze)
     fitness_renderer = FitnessRenderer()
     fitness_history_renderer = FitnessHistoryRenderer()
+    gens_per_sec_renderer = GenerationsPerSecondRenderer()
+    fitness_rate_renderer = FitnessRateRenderer()
 
     # The maze renderer is by far the most expensive part of a tick, so we only
     # animate it once every WATCH_EVERY generations. The intervening generations
@@ -587,6 +738,8 @@ if __name__ == "__main__":
         fitnesses = population.evolve()
         fitness_renderer.update(fitnesses)
         fitness_history_renderer.update(fitnesses)
+        gens_per_sec_renderer.update(population.fitness_history[-1].get("duration_s"))
+        fitness_rate_renderer.update(fitnesses)
         _state["generation"] += 1
         _state["tick"] = 0
         _state["watching"] = _state["generation"] % WATCH_EVERY == 0
@@ -628,3 +781,5 @@ if __name__ == "__main__":
         renderer.close()
         fitness_renderer.close()
         fitness_history_renderer.close()
+        gens_per_sec_renderer.close()
+        fitness_rate_renderer.close()

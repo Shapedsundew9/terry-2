@@ -547,7 +547,7 @@ if __name__ == "__main__":
     # Example usage: generate and render a maze.
     FPS = 10
     TICKS_PER_GEN = 100  # Ticks simulated per generation before evolving.
-    WATCH_EVERY = 10  # Animate the maze every Nth generation; others run headless.
+    WATCH_EVERY = 100  # Animate the maze every Nth generation; others run headless.
     maze = Maze(name="ExampleMaze", side_length_bits=6, seed=42)
     population = Population(
         size=100,

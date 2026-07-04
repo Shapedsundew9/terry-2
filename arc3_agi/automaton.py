@@ -70,6 +70,7 @@ class AutomatonBase(Checkpointable):
         self.fitness = 0.0
         self.coords = []
         self.last_action = -1
+        self.genetic_code.reset_trajectory()
 
     # ------------------------------------------------------------------
     # Checkpoint interface
@@ -173,7 +174,9 @@ class AutomatonISBase(AutomatonBase):
         self.env_mask = (1 << self.env_bits) - 1
         self.state_mask = (1 << self.state_bits) - 1
         self.resp_mask = (1 << self.resp_bits) - 1
-        self.internal_state: int = 0
+        self.internal_state: int = self.rng.getrandbits(
+            self.state_bits
+        )  # Internal state of the automaton.
 
     def reset(self) -> None:
         """Resets the automaton's internal state and fitness."""

@@ -18,7 +18,7 @@ from numpy.typing import NDArray
 from arc3_agi.automaton import ActionStatus, AutomatonISBase
 from arc3_agi.checkpoint import CheckpointConfig
 from arc3_agi.environment import LayeredStaticBoolean2DGrid, StaticBoolean2DGrid
-from arc3_agi.genetic_code import GeneticCodeDict
+from arc3_agi.genetic_code import GeneticCodeGraph
 from arc3_agi.population import Population
 
 matplotlib.use("webagg")
@@ -228,14 +228,10 @@ class MazeAutomaton(AutomatonISBase):
             environment=kwargs.get("environment"),
         )
         if self.genetic_code is None:
-            self.genetic_code = GeneticCodeDict(
-                {}, resp_bits=self.state_bits + self.resp_bits
+            self.genetic_code = GeneticCodeGraph(
+                {},
+                resp_bits=self.state_bits + self.resp_bits,
             )
-        #    self.genetic_code = GeneticCodeDict(
-        #        num_nodes=64,
-        #        input_bits=self.env_bits + self.state_bits,
-        #        resp_bits=self.state_bits + self.resp_bits,
-        #    )
         assert isinstance(
             self.environment, Maze
         ), "MazeAutomaton requires a Maze environment."
@@ -243,7 +239,7 @@ class MazeAutomaton(AutomatonISBase):
         self.coords = [
             kwargs.get("x", fx),
             kwargs.get("y", fy),
-            kwargs.get("orientation", Maze.Orientation.UP).value,
+            kwargs.get("orientation", Maze.Orientation(self.rng.randint(0, 3))).value,
         ]
 
         # Since automata do not interact in anyway, even through the environment
@@ -330,7 +326,7 @@ class MazeAutomaton(AutomatonISBase):
             self.environment, Maze
         ), "MazeAutomaton requires a Maze environment."
         fx, fy = self.environment.random_free_cell()
-        random_orientation = Maze.Orientation(int(self.rng.randint(0, 3)))
+        random_orientation = Maze.Orientation(self.rng.randint(0, 3))
         self.coords = [fx, fy, random_orientation.value]
         self.energy = 10  # Reset energy to initial value.
         self.energy_grid = bytearray(

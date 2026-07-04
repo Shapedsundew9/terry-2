@@ -252,7 +252,12 @@ class MazeAutomaton(AutomatonISBase):
         # NOTE: The automaton cannot 'see' the energy grid; it is only used for
         # shaping the fitness function so that the automaton is incentivized to
         # explore the maze and find the goal.
-        self.energy: int = 10  # Initial energy for the automaton; can be tuned.
+        self.energy: int = 15  # Initial energy budget; MUST be << TICKS_PER_GEN.
+        # A zero-gain automaton (invalid-looper) loses 1 energy/tick and gains
+        # nothing, so with energy=10 it dies after 10 ticks and wastes none of
+        # the remaining 90.  A good explorer gains +2 per new cell visited, so
+        # visiting just 5 new cells in the first 10 ticks keeps it alive for
+        # the full generation.
         self._grid_width: int = self.environment.width
         self.energy_grid: bytearray = bytearray(
             b"\x01" * (self.environment.width * self.environment.height)
@@ -271,6 +276,18 @@ class MazeAutomaton(AutomatonISBase):
     def orientation(self) -> Maze.Orientation:
         return Maze.Orientation(self.coords[2])
 
+    @property
+    def is_active(self) -> bool:
+        """Return False once energy is exhausted.
+
+        Population.tick() checks this before each tick so that automata that
+        have run out of energy (typically invalid-loopers or chronic wall-
+        bangers) stop consuming CPU for the remainder of the generation.
+        The automaton remains in the population list and its accumulated
+        (possibly negative) fitness is used normally at breeding time.
+        """
+        return self.energy > 0
+
     def attempt_action(self, action: int) -> ActionStatus:
         """Perform the given action."""
         action_int = action & self.resp_mask
@@ -288,6 +305,7 @@ class MazeAutomaton(AutomatonISBase):
                 if self.environment.is_wall(dx, dy):
                     # NOTE: The environment is bordered by walls, so out-of-bounds
                     # is also a wall collision.
+                    self.fitness -= 0.05  # B: small penalty for wasted move into wall
                     return ActionStatus.FAILED
 
                 # If it is free space move
@@ -317,6 +335,9 @@ class MazeAutomaton(AutomatonISBase):
                 self.coords[2] = (self.coords[2] + 1) & 3
                 return ActionStatus.SUCCEEDED
             case _:
+                self.fitness -= (
+                    0.1  # B: larger penalty for invalid (meaningless) action
+                )
                 return ActionStatus.INVALID
 
     def reset(self) -> None:
@@ -328,7 +349,7 @@ class MazeAutomaton(AutomatonISBase):
         fx, fy = self.environment.random_free_cell()
         random_orientation = Maze.Orientation(self.rng.randint(0, 3))
         self.coords = [fx, fy, random_orientation.value]
-        self.energy = 10  # Reset energy to initial value.
+        self.energy = 15  # Reset energy to initial value.
         self.energy_grid = bytearray(
             b"\x01" * (self.environment.width * self.environment.height)
         )

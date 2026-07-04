@@ -45,6 +45,17 @@ class AutomatonBase(Checkpointable):
         self.last_action: int = -1  # Last action taken.
         self.rng = Random(kwargs.get("seed", None))
 
+    @property
+    def is_active(self) -> bool:
+        """Return True while this automaton should continue receiving ticks.
+
+        The base implementation always returns True.  Subclasses that model
+        energy or a finite lifespan should override this to return False once
+        the automaton has exhausted its resources, signalling Population.tick()
+        to stop spending CPU on it for the remainder of the generation.
+        """
+        return True
+
     def attempt_action(self, action: int) -> ActionStatus:
         """Given an action integer, attempt to perform the corresponding action.
 

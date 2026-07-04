@@ -41,9 +41,16 @@ class Population(Checkpointable):
             self._run_dir = None
 
     def tick(self) -> None:
-        """Perform a tick for all automata using batched environment observation."""
+        """Perform a tick for all automata using batched environment observation.
+
+        Automata whose ``is_active`` property returns False are skipped — they
+        have exhausted their energy budget and would only waste CPU.  They
+        remain in the population list and their accumulated fitness is used
+        normally at the next ``evolve()`` call.
+        """
         for automaton in self.automata:
-            automaton.tick()
+            if automaton.is_active:
+                automaton.tick()
         self.tick_count += 1
 
     def evolve(self) -> list[float]:
@@ -51,11 +58,20 @@ class Population(Checkpointable):
         self.automata.sort(key=lambda a: a.fitness, reverse=True)
         # Keep the top 50% and replace the rest with offspring.
         survivors = self.automata[: len(self.automata) // 2]
+        # D: Only breed from survivors that have earned positive fitness.
+        # Zero-fitness automatons are kept alive this generation but cannot
+        # be parents, so the pathological sitting-still genotype is never
+        # directly propagated — it must be re-created by crossover each time,
+        # and with only fit parents that pressure diminishes rapidly.
+        breeding_pool = [a for a in survivors if a.fitness > 0.0]
+        if not breeding_pool:
+            # Fallback for pathological early generations where no automaton moved.
+            breeding_pool = survivors[: max(1, len(survivors) // 10)]
         offspring = []
         for i in range(len(self.automata) // 2):
-            parent1 = survivors[randrange(len(survivors))]
+            parent1 = breeding_pool[randrange(len(breeding_pool))]
             assert isinstance(parent1.genetic_code, GeneticCode)
-            parent2 = survivors[randrange(len(survivors))]
+            parent2 = breeding_pool[randrange(len(breeding_pool))]
             assert isinstance(parent2.genetic_code, GeneticCode)
             child_genetic_code = parent1.genetic_code.crossover(parent2.genetic_code)
             child = self._automata_class(

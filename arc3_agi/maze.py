@@ -301,7 +301,7 @@ class MazeAutomaton(AutomatonISBase):
                 # See if energy is there
                 idx = y * self._grid_width + x
                 energy = self.energy_grid[idx]
-                self.fitness += energy
+                self.fitness += energy + 0.1  # Tiny boost for any forward move.
                 self.energy += energy * 2  # Gain energy for moving into a new cell.
                 self.energy_grid[idx] = 0
 
@@ -330,7 +330,8 @@ class MazeAutomaton(AutomatonISBase):
             self.environment, Maze
         ), "MazeAutomaton requires a Maze environment."
         fx, fy = self.environment.random_free_cell()
-        self.coords = [fx, fy, Maze.Orientation.UP.value]
+        random_orientation = Maze.Orientation(int(self.rng.randint(0, 3)))
+        self.coords = [fx, fy, random_orientation.value]
         self.energy = 10  # Reset energy to initial value.
         self.energy_grid = bytearray(
             b"\x01" * (self.environment.width * self.environment.height)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from enum import IntEnum
+from random import Random
 from typing import Any
 
 import numpy as np
@@ -42,6 +43,7 @@ class AutomatonBase(Checkpointable):
         self.coords: list[int] = []  # n-dimensional coordinates.
         self.fitness: float = 0.0
         self.last_action: int = -1  # Last action taken.
+        self.rng = Random(kwargs.get("seed", None))
 
     def attempt_action(self, action: int) -> ActionStatus:
         """Given an action integer, attempt to perform the corresponding action.
@@ -203,6 +205,9 @@ class AutomatonISBase(AutomatonBase):
     ) -> AutomatonISBase:
         inst = super().from_dict(d, arrays, **kwargs)
         a_data = d["automaton"]
+        assert isinstance(
+            inst, AutomatonISBase
+        ), "from_dict() must return an instance of AutomatonISBase."
         inst.internal_state = a_data["internal_state"]
         return inst
 

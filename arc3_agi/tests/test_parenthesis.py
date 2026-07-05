@@ -116,6 +116,7 @@ def test_tick_reports_done_at_end_of_sequence() -> None:
     # is just the current token (OPEN=1, then CLOSE=2).
     code = GeneticCodeDict({1: 0, 2: 0}, resp_bits=10)
     auto = ParenthesisAutomaton(environment=env, genetic_code=code)
+    auto.internal_state = 0  # ensure internal state is 0 to match code
 
     assert auto.tick() == ParenthesisAction.CONSISTENT.value  # position 0
     assert auto.coords == [1]

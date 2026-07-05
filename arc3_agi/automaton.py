@@ -192,7 +192,7 @@ class AutomatonISBase(AutomatonBase):
     def reset(self) -> None:
         """Resets the automaton's internal state and fitness."""
         super().reset()
-        self.internal_state = 0
+        self.internal_state = self.rng.getrandbits(self.state_bits)
 
     # ------------------------------------------------------------------
     # Checkpoint interface

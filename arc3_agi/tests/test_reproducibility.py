@@ -23,7 +23,7 @@ from arc3_agi.population import Population
 
 SIDE_BITS = 4  # 16×16 maze
 POP_SIZE = 10
-TICKS_PER_GEN = 20
+TICKS_PER_RESTART = 20
 NUM_GENERATIONS = 5
 SEED_A = 1234
 SEED_B = 5678  # different seed — must produce different results
@@ -49,8 +49,7 @@ def _run_population(seed: int | None, maze: Maze) -> list[dict]:
         seed=seed,
     )
     for _ in range(NUM_GENERATIONS):
-        for _ in range(TICKS_PER_GEN):
-            pop.tick()
+        pop.run_generation(TICKS_PER_RESTART)
         pop.evolve()
     return pop.fitness_history
 

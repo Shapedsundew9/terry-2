@@ -98,6 +98,41 @@ class Population(Checkpointable):
                 automaton.tick()
         self.tick_count += 1
 
+    def run_generation(self, ticks_per_restart: int, restarts_per_gen: int = 1) -> None:
+        """Run one full generation consisting of one or more restarts.
+
+        Each restart is an independent attempt at the environment: the automaton
+        and the environment are both reset between restarts so that starting
+        conditions cannot bias the outcome.  After all restarts the fitness of
+        each automaton is set to the **mean** of its per-restart scores, which
+        is then consumed by the next :meth:`evolve` call.
+
+        Parameters
+        ----------
+        ticks_per_restart:
+            Number of :meth:`tick` calls executed within each restart.
+        restarts_per_gen:
+            Number of restarts to perform per generation.  1 (the default)
+            reproduces the original single-attempt behaviour.
+        """
+        fitness_acc = [0.0] * len(self.automata)
+        for restart in range(restarts_per_gen):
+            if restart > 0:
+                # Provide each automaton with a fresh environment and a clean
+                # internal state.  Fingerprints are NOT reset — they are
+                # heritable traits that persist across a whole generation.
+                self.environment.reset()
+                for automaton in self.automata:
+                    automaton.reset()
+            for _ in range(ticks_per_restart):
+                self.tick()
+            for i, automaton in enumerate(self.automata):
+                fitness_acc[i] += automaton.fitness
+        # Replace each automaton's running fitness with the generation mean so
+        # that evolve() ranks automata on averaged performance.
+        for i, automaton in enumerate(self.automata):
+            automaton.fitness = fitness_acc[i] / restarts_per_gen
+
     def evolve(self) -> list[float]:
         """Evolve the population based on fitness, track history, and checkpoint."""
         self.automata.sort(key=lambda a: a.fitness, reverse=True)

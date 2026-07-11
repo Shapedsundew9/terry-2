@@ -31,6 +31,15 @@ class Environment:
         """Sets the local environment at the given coordinates to the provided value."""
         raise NotImplementedError("set_local method must be implemented by subclasses")
 
+    def reset(self, **kwargs) -> None:
+        """Reset the environment to its initial state.
+
+        The base implementation is a no-op.  Subclasses that hold mutable state
+        (e.g. a dynamic grid, energy map, or random starting configuration)
+        should override this so that :meth:`Population.run_generation` can
+        provide each restart with a clean environment.
+        """
+
 
 class Int1DArray(Environment):
     def __init__(self, name: str, **kwargs) -> None:

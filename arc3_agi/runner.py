@@ -21,7 +21,8 @@ Usage example::
         size=100,
         AutomatonClass=MazeAutomaton,
         environment=maze,
-        ticks_per_gen=100,
+        ticks_per_restart=100,
+        restarts_per_gen=3,
         checkpoint_config=CheckpointConfig(generation_interval=10),
         fingerprint_config=FingerprintConfig(bits=4, tournament_k=4),
     )
@@ -38,6 +39,7 @@ Usage example::
 
 from __future__ import annotations
 
+import math
 import multiprocessing
 import random
 import secrets
@@ -72,8 +74,12 @@ class PopulationConfig:
                           subclass to instantiate for each member.
         environment:      Environment instance shared by all automata in this
                           population.
-        ticks_per_gen:    Number of :meth:`~Population.tick` calls executed
-                          before each :meth:`~Population.evolve` call.
+        ticks_per_restart: Number of :meth:`~Population.tick` calls executed
+                          within each restart.
+        restarts_per_gen: Number of independent restarts per generation.  The
+                          fitness used by :meth:`~Population.evolve` is the
+                          mean across all restarts.  Defaults to 1 (original
+                          single-attempt behaviour).
         checkpoint_config: Optional checkpoint settings.  The runner overrides
                           ``base_dir`` to an isolated per-population
                           subdirectory; ``enabled`` and ``generation_interval``
@@ -84,7 +90,8 @@ class PopulationConfig:
     size: int
     AutomatonClass: type[AutomatonBase]
     environment: Environment
-    ticks_per_gen: int
+    ticks_per_restart: int
+    restarts_per_gen: int = 1
     checkpoint_config: CheckpointConfig | None = None
     fingerprint_config: FingerprintConfig | None = None
     seed: int | None = None
@@ -162,8 +169,7 @@ def _worker_fn(
         )
 
         for gen in range(max_generations):
-            for _ in range(config.ticks_per_gen):
-                population.tick()
+            population.run_generation(config.ticks_per_restart, config.restarts_per_gen)
             fitnesses = population.evolve()
             n = len(fitnesses)
             queue.put(
@@ -212,6 +218,8 @@ class PopulationHandle:
             "min_fitness": float("nan"),
             "max_fitness": float("nan"),
             "mean_fitness": float("nan"),
+            "best_max_fitness": float("nan"),
+            "best_mean_fitness": float("nan"),
             "is_running": True,
         }
 
@@ -228,13 +236,28 @@ class PopulationHandle:
           all generations (or encountered an error).
         * ``"error"`` (*str*, optional) — only present if the worker raised.
         """
+        best_max = self._latest.get("best_max_fitness", float("nan"))
+        best_mean = self._latest.get("best_mean_fitness", float("nan"))
         latest: dict[str, Any] | None = None
         try:
             while True:
-                latest = self._queue.get_nowait()
+                item = self._queue.get_nowait()
+                item_max = item.get("max_fitness", float("nan"))
+                item_mean = item.get("mean_fitness", float("nan"))
+                if not math.isnan(item_max) and (
+                    math.isnan(best_max) or item_max > best_max
+                ):
+                    best_max = item_max
+                if not math.isnan(item_mean) and (
+                    math.isnan(best_mean) or item_mean > best_mean
+                ):
+                    best_mean = item_mean
+                latest = item
         except Empty:
             pass
         if latest is not None:
+            latest["best_max_fitness"] = best_max
+            latest["best_mean_fitness"] = best_mean
             self._latest = latest
         return dict(self._latest)
 

@@ -19,7 +19,7 @@ from arc3_agi.automaton import ActionStatus, AutomatonISBase
 from arc3_agi.checkpoint import CheckpointConfig
 from arc3_agi.environment import LayeredStaticBoolean2DGrid, StaticBoolean2DGrid
 from arc3_agi.fingerprint import FingerprintConfig
-from arc3_agi.genetic_code import GeneticCodeGraph
+from arc3_agi.genetic_code import GeneticCodeDict, GeneticCodeGraph
 from arc3_agi.population import Population
 
 matplotlib.use("webagg")
@@ -231,7 +231,7 @@ class MazeAutomaton(AutomatonISBase):
             seed=kwargs.get("seed", None),
         )
         if self.genetic_code is None:
-            self.genetic_code = GeneticCodeGraph(
+            self.genetic_code = GeneticCodeDict(
                 {},
                 seed=self.rng.randint(0, 2**32 - 1),
                 resp_bits=self.state_bits + self.resp_bits,
@@ -885,7 +885,7 @@ if __name__ == "__main__":
 
     # Example usage: generate and render a maze.
     FPS = 10
-    TICKS_PER_GEN = 100  # Ticks simulated per generation before evolving.
+    TICKS_PER_RESTART = 100  # Ticks simulated per restart before evolving.
     WATCH_EVERY = 100  # Animate the maze every Nth generation; others run headless.
     maze = Maze(name="ExampleMaze", side_length_bits=6, seed=42)
     population = Population(
@@ -926,13 +926,13 @@ if __name__ == "__main__":
                 population.tick()
                 renderer.render(population.automata[:20])
                 _state["tick"] += 1
-                if _state["tick"] >= TICKS_PER_GEN:
+                if _state["tick"] >= TICKS_PER_RESTART:
                     _finish_generation()
             else:
                 # Burn through whole generations headless until the next watched
                 # generation, then hand back to the animation path above.
                 while not _state["watching"]:
-                    for _ in range(TICKS_PER_GEN):
+                    for _ in range(TICKS_PER_RESTART):
                         population.tick()
                     _finish_generation()
                 renderer.render(population.automata[:20])

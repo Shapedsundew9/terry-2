@@ -38,7 +38,7 @@ def basic_config(maze: Maze, tmp_path: Path) -> PopulationConfig:
         size=POP_SIZE,
         AutomatonClass=MazeAutomaton,
         environment=maze,
-        ticks_per_gen=TICKS,
+        ticks_per_restart=TICKS,
         checkpoint_config=CheckpointConfig(
             enabled=True,
             base_dir=tmp_path / "ckpts",
@@ -58,11 +58,11 @@ class TestPopulationConfig:
             size=50,
             AutomatonClass=MazeAutomaton,
             environment=maze,
-            ticks_per_gen=20,
+            ticks_per_restart=20,
         )
         assert cfg.size == 50
         assert cfg.AutomatonClass is MazeAutomaton
-        assert cfg.ticks_per_gen == 20
+        assert cfg.ticks_per_restart == 20
         assert cfg.checkpoint_config is None
         assert cfg.fingerprint_config is None
 
@@ -72,7 +72,7 @@ class TestPopulationConfig:
             size=10,
             AutomatonClass=MazeAutomaton,
             environment=maze,
-            ticks_per_gen=5,
+            ticks_per_restart=5,
             fingerprint_config=fp,
         )
         assert cfg.fingerprint_config is fp
@@ -185,7 +185,7 @@ class TestLaunchPopulations:
             size=POP_SIZE,
             AutomatonClass=MazeAutomaton,
             environment=maze,
-            ticks_per_gen=TICKS,
+            ticks_per_restart=TICKS,
             checkpoint_config=CheckpointConfig(
                 enabled=False, base_dir=tmp_path / "ckpts"
             ),
@@ -204,14 +204,14 @@ class TestLaunchPopulations:
             size=POP_SIZE,
             AutomatonClass=MazeAutomaton,
             environment=maze_a,
-            ticks_per_gen=TICKS,
+            ticks_per_restart=TICKS,
             checkpoint_config=CheckpointConfig(enabled=False),
         )
         cfg_b = PopulationConfig(
             size=POP_SIZE * 2,
             AutomatonClass=MazeAutomaton,
             environment=maze_b,
-            ticks_per_gen=TICKS * 2,
+            ticks_per_restart=TICKS * 2,
             checkpoint_config=CheckpointConfig(enabled=False),
         )
         handles = launch_populations(
@@ -227,7 +227,7 @@ class TestLaunchPopulations:
             size=POP_SIZE,
             AutomatonClass=MazeAutomaton,
             environment=maze,
-            ticks_per_gen=TICKS,
+            ticks_per_restart=TICKS,
             checkpoint_config=CheckpointConfig(enabled=False),
             fingerprint_config=FingerprintConfig(bits=4, tournament_k=2),
         )

@@ -16,6 +16,7 @@ or import and call :func:`run` from another script.
 
 from __future__ import annotations
 
+import math
 import sys
 import time
 from pathlib import Path
@@ -34,14 +35,20 @@ from arc3_agi.runner import (
 # Tuneable constants
 # ---------------------------------------------------------------------------
 
-NUM_POPULATIONS: int = 12
+NUM_POPULATIONS: int = 14
 """Number of independent populations to evolve in parallel."""
 
-MAX_GENERATIONS: int = 1000
+MAX_GENERATIONS: int = 10000
 """Total number of tick/evolve cycles each population runs before stopping."""
 
-TICKS_PER_GEN: int = 100
-"""Number of :meth:`~arc3_agi.population.Population.tick` calls per generation."""
+TICKS_PER_RESTART: int = 100
+"""Number of :meth:`~arc3_agi.population.Population.tick` calls per restart."""
+
+RESTARTS_PER_GEN: int = 20
+"""Number of independent restarts per generation.  Fitness is averaged across
+all restarts to reduce starting-condition bias.  Set to 1 to reproduce the
+original single-attempt behaviour.
+"""
 
 POPULATION_SIZE: int = 100
 """Number of automata in each population."""
@@ -96,22 +103,61 @@ def _format_table(
     done = sum(1 for h in handles if not h.is_running)
     lines: list[str] = [
         f"  Elapsed: {elapsed_s:6.0f}s   Finished: {done}/{len(handles)} populations",
-        f"  {'Pop':>3}  {'Gen':>6}/{max_generations:<6}  {'Max fit':>9}  {'Mean fit':>9}  {'Status':<8}",
-        "  " + "-" * 56,
+        f"  {'Pop':>3}  {'Gen':>6}/{max_generations:<6}  {'Max fit':>9}  {'Mean fit':>9}  "
+        f"{'Best Max':>9}  {'Best Mean':>9}  {'Status':<8}",
+        "  " + "-" * 78,
     ]
+
+    # Accumulators for the summary row.
+    sum_max = sum_mean = sum_best_max = sum_best_mean = 0.0
+    n_valid = 0
+
+    # Cache progress snapshots so we don't drain the queue twice.
+    snapshots: list[dict] = []
     for h in handles:
-        prog = h.progress
+        snapshots.append(h.progress)
+
+    for h, prog in zip(handles, snapshots):
         gen = prog.get("generation", 0)
         mx = prog.get("max_fitness", float("nan"))
         mn = prog.get("mean_fitness", float("nan"))
+        bm = prog.get("best_max_fitness", float("nan"))
+        bmn = prog.get("best_mean_fitness", float("nan"))
         status = "done" if not h.is_running else "running"
         pct = 100 * gen / max_generations if max_generations else 0
         bar_filled = int(pct / 10)
         bar = "[" + "#" * bar_filled + "." * (10 - bar_filled) + "]"
         lines.append(
             f"  {h.population_id:>3}  {gen:>6}/{max_generations:<6}  "
-            f"{mx:>9.3f}  {mn:>9.3f}  {status:<8}  {pct:5.1f}% {bar}"
+            f"{mx:>9.3f}  {mn:>9.3f}  {bm:>9.3f}  {bmn:>9.3f}  "
+            f"{status:<8}  {pct:5.1f}% {bar}"
         )
+        if (
+            not math.isnan(mx)
+            and not math.isnan(mn)
+            and not math.isnan(bm)
+            and not math.isnan(bmn)
+        ):
+            sum_max += mx
+            sum_mean += mn
+            sum_best_max += bm
+            sum_best_mean += bmn
+            n_valid += 1
+
+    # Summary row.
+    lines.append("  " + "-" * 78)
+    if n_valid:
+        avg_max = sum_max / n_valid
+        avg_mean = sum_mean / n_valid
+        avg_best_max = sum_best_max / n_valid
+        avg_best_mean = sum_best_mean / n_valid
+        lines.append(
+            f"  {'AVG':>3}  {'':>6} {'':6}  "
+            f"{avg_max:>9.3f}  {avg_mean:>9.3f}  {avg_best_max:>9.3f}  {avg_best_mean:>9.3f}  "
+            f"{'':8}"
+        )
+    else:
+        lines.append(f"  {'AVG':>3}  (no data yet)")
     return lines
 
 
@@ -175,9 +221,10 @@ def build_configs(maze: Maze) -> list[PopulationConfig]:
             size=POPULATION_SIZE,
             AutomatonClass=MazeAutomaton,
             environment=maze,
-            ticks_per_gen=TICKS_PER_GEN,
+            ticks_per_restart=TICKS_PER_RESTART,
+            restarts_per_gen=RESTARTS_PER_GEN,
             checkpoint_config=ckpt_cfg,
-            fingerprint_config=fp_cfg,
+            fingerprint_config=None,  # fp_cfg,
             seed=POPULATION_SEED + i if POPULATION_SEED is not None else None,
         )
         for i in range(NUM_POPULATIONS)
@@ -206,7 +253,7 @@ def run(base_dir: Path = BASE_DIR) -> list[PopulationHandle]:
 
     print(
         f"\nMaze Runner — {NUM_POPULATIONS} populations × {MAX_GENERATIONS} generations "
-        f"× {TICKS_PER_GEN} ticks/gen\n"
+        f"× {TICKS_PER_RESTART} ticks/restart × {RESTARTS_PER_GEN} restart(s)/gen\n"
         f"  Maze: {maze.width}×{maze.height}  "
         f"Population size: {POPULATION_SIZE}  "
         f"Checkpoint every: {CHECKPOINT_INTERVAL} gens\n"

@@ -8,6 +8,7 @@ import numpy as np
 
 from arc3_agi.checkpoint import SCHEMA_VERSION, Checkpointable, genetic_code_from_dict
 from arc3_agi.environment import Environment
+from arc3_agi.fingerprint import FingerprintConfig, SelectionFingerprint
 from arc3_agi.genetic_code import GeneticCode, GeneticCodeDict
 
 
@@ -44,6 +45,12 @@ class AutomatonBase(Checkpointable):
         self.fitness: float = 0.0
         self.last_action: int = -1  # Last action taken.
         self.rng = Random(kwargs.get("seed", None))
+        fp_config: FingerprintConfig | None = kwargs.get("fingerprint_config", None)
+        self.fingerprint: SelectionFingerprint | None = (
+            SelectionFingerprint(fp_config.bits, rng=self.rng)
+            if fp_config is not None
+            else None
+        )
 
     @property
     def is_active(self) -> bool:
@@ -77,7 +84,11 @@ class AutomatonBase(Checkpointable):
         return ActionStatus.SUCCEEDED
 
     def reset(self) -> None:
-        """Resets the automaton's state and fitness."""
+        """Resets the automaton's state and fitness.
+
+        Note: the selection fingerprint is intentionally NOT reset here — it is
+        a heritable trait that persists across generations.
+        """
         self.fitness = 0.0
         self.coords = []
         self.last_action = -1
@@ -102,6 +113,14 @@ class AutomatonBase(Checkpointable):
                 "fitness": self.fitness,
                 "coords": list(self.coords),
                 "last_action": self.last_action,
+                **(
+                    {
+                        "fingerprint_bits": self.fingerprint.bits,
+                        "fingerprint_value": self.fingerprint.value,
+                    }
+                    if self.fingerprint is not None
+                    else {}
+                ),
             },
             "genetic_code": self.genetic_code.to_dict(),
         }
@@ -131,12 +150,26 @@ class AutomatonBase(Checkpointable):
         a_data = d["automaton"]
         # Pass constructor-relevant fields from saved data (e.g. env_bits/state_bits
         # for ISBase subclasses). Exclude runtime fields restored separately.
-        _post_init = {"fitness", "coords", "last_action", "internal_state", "energy"}
+        _post_init = {
+            "fitness",
+            "coords",
+            "last_action",
+            "internal_state",
+            "energy",
+            "fingerprint_bits",
+            "fingerprint_value",
+        }
         ctor_kwargs = {k: v for k, v in a_data.items() if k not in _post_init}
         inst = cls(environment=environment, genetic_code=genetic_code, **ctor_kwargs)
         inst.fitness = a_data["fitness"]
         inst.coords = list(a_data["coords"])
         inst.last_action = a_data["last_action"]
+        fp_bits = a_data.get("fingerprint_bits")
+        fp_value = a_data.get("fingerprint_value")
+        if fp_bits is not None and fp_value is not None:
+            inst.fingerprint = SelectionFingerprint(
+                fp_bits, rng=inst.rng, value=fp_value
+            )
         return inst
 
     def tick(self) -> int:

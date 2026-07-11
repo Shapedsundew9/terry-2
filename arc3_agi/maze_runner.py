@@ -37,7 +37,7 @@ from arc3_agi.runner import (
 NUM_POPULATIONS: int = 12
 """Number of independent populations to evolve in parallel."""
 
-MAX_GENERATIONS: int = 1_000
+MAX_GENERATIONS: int = 1000
 """Total number of tick/evolve cycles each population runs before stopping."""
 
 TICKS_PER_GEN: int = 100
@@ -64,7 +64,7 @@ FINGERPRINT_BITS: int = 4
 FINGERPRINT_TOURNAMENT_K: int = 4
 """Tournament size for fingerprint-guided mate selection."""
 
-CHECKPOINT_INTERVAL: int = 100
+CHECKPOINT_INTERVAL: int = 1000
 """Write a checkpoint every this many generations (0 = disable)."""
 
 POLL_INTERVAL_S: float = 2.0

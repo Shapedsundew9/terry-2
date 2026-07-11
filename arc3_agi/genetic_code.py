@@ -4,7 +4,7 @@ from abc import abstractmethod
 from collections.abc import Mapping, MutableMapping
 from math import log
 from random import Random, randint, randrange
-from typing import Any, Iterator, Self, Sequence
+from typing import Any, Callable, Iterator, Self, Sequence
 
 import numpy as np
 
@@ -29,6 +29,7 @@ class GeneticCode(MutableMapping[int, int], Checkpointable):
         code: Mapping[int, int] | Sequence[int] | None,
         seed: int | None = None,
         resp_bits: int = 1,
+        missing_key_value_fn: Callable[[], int] | None = None,
     ) -> None:
         """Initialises the genetic code with a given mapping. The mapping can be provided
         as a dictionary or a sequence (implicitly index mapped).
@@ -36,6 +37,7 @@ class GeneticCode(MutableMapping[int, int], Checkpointable):
         self._seed = seed
         self._rng = Random(seed)
         self.resp_bits = resp_bits
+        self._mkvfn = missing_key_value_fn or (lambda: self._rng.getrandbits(resp_bits))
 
     def reset_trajectory(self) -> None:
         """Reset any per-episode tracking state.
@@ -86,7 +88,7 @@ class GeneticCodeDict(GeneticCode):
 
     def __getitem__(self, key: int) -> int:
         if key not in self._code:
-            value = self._rng.getrandbits(self.resp_bits)
+            value = self._mkvfn()
             self._code[key] = value
         return self._code[key]
 
@@ -333,7 +335,9 @@ class GeneticCodeSCC(GeneticCodeDict):
     # Crossover
     # ------------------------------------------------------------------
 
-    def crossover(self, other: GeneticCode, mutation_rate: float = 0.01) -> GeneticCodeSCC:
+    def crossover(
+        self, other: GeneticCode, mutation_rate: float = 0.01
+    ) -> GeneticCodeSCC:
         """SCC-aware crossover between *self* (parent A) and *other* (parent B).
 
         Algorithm
@@ -344,12 +348,12 @@ class GeneticCodeSCC(GeneticCodeDict):
         4. Stitch dangling cross-SCC edges to a random entry-point in the target SCC.
         5. Apply per-entry point-mutation (geometric sampling, same as GeneticCodeDict).
         """
-        assert isinstance(other, GeneticCodeSCC), (
-            "GeneticCodeSCC can only crossover with another GeneticCodeSCC."
-        )
-        assert other.env_bits == self.env_bits and other.state_bits == self.state_bits, (
-            "Both parents must have the same env_bits and state_bits."
-        )
+        assert isinstance(
+            other, GeneticCodeSCC
+        ), "GeneticCodeSCC can only crossover with another GeneticCodeSCC."
+        assert (
+            other.env_bits == self.env_bits and other.state_bits == self.state_bits
+        ), "Both parents must have the same env_bits and state_bits."
 
         rng = self._rng
 
@@ -607,9 +611,9 @@ class GeneticCodeGraph(GeneticCodeDict):
         4. Skip any key already claimed by a BFS pull — no overwrites.
         5. Apply per-entry point-mutation via geometric sampling.
         """
-        assert isinstance(other, GeneticCodeGraph), (
-            "GeneticCodeGraph can only crossover with another GeneticCodeGraph."
-        )
+        assert isinstance(
+            other, GeneticCodeGraph
+        ), "GeneticCodeGraph can only crossover with another GeneticCodeGraph."
 
         rng = self._rng
         threshold = self.edge_threshold

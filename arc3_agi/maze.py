@@ -1,7 +1,7 @@
 from enum import IntEnum
 from operator import is_
 from signal import SIGINT, signal
-from typing import Optional
+from typing import Callable, Optional
 
 import matplotlib
 import numpy as np
@@ -294,6 +294,22 @@ class MazeAutomaton(AutomatonISBase):
         (possibly negative) fitness is used normally at breeding time.
         """
         return self.energy > 0
+
+    def _gen_mkvfn(self) -> Callable[[], int]:
+        """Return a function that returns the automaton's current state and
+        environment stimulus as a single integer, suitable for use as a key
+        in the genetic code graph.
+        """
+
+        def mkvfn() -> int:
+            # A zero internal state is only allowed on reset().
+            # It is an indication that the automaton has not yet been ticked
+            # and is not yet in a valid state.
+            internal_state = self.rng.randint(1, (1 << self.state_bits) - 1)
+            action = self.rng.randint(0, 2)
+            return (internal_state << self.env_bits) | action
+
+        return mkvfn
 
     def attempt_action(self, action: int) -> ActionStatus:
         """Perform the given action."""

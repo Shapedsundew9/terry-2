@@ -228,16 +228,21 @@ class MazeAutomaton(AutomatonISBase):
             resp_bits=2,
             environment=kwargs.get("environment"),
             fingerprint_config=kwargs.get("fingerprint_config", None),
+            seed=kwargs.get("seed", None),
         )
         if self.genetic_code is None:
             self.genetic_code = GeneticCodeGraph(
                 {},
+                seed=self.rng.randint(0, 2**32 - 1),
                 resp_bits=self.state_bits + self.resp_bits,
             )
         assert isinstance(
             self.environment, Maze
         ), "MazeAutomaton requires a Maze environment."
-        fx, fy = self.environment.random_free_cell()
+        # Use self.rng (seeded from Population) to decouple starting position
+        # from the shared Maze.rng state.
+        free = self.environment.free
+        fx, fy = free[self.rng.randrange(len(free))]
         self.coords = [
             kwargs.get("x", fx),
             kwargs.get("y", fy),
@@ -348,7 +353,11 @@ class MazeAutomaton(AutomatonISBase):
         assert isinstance(
             self.environment, Maze
         ), "MazeAutomaton requires a Maze environment."
-        fx, fy = self.environment.random_free_cell()
+        # Use the automaton's own rng so each automaton's starting position is
+        # independent and derived purely from its own seed — not coupled to
+        # the shared Maze.rng state.
+        free = self.environment.free
+        fx, fy = free[self.rng.randrange(len(free))]
         random_orientation = Maze.Orientation(self.rng.randint(0, 3))
         self.coords = [fx, fy, random_orientation.value]
         self.energy = 15  # Reset energy to initial value.

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import datetime
 from pathlib import Path
-from random import randrange
+from random import Random, randrange
 from typing import Any
 
 import numpy as np
@@ -18,6 +18,7 @@ def _tournament_select(
     pool: list[AutomatonBase],
     selector: AutomatonBase | None,
     k: int,
+    rng: Random,
 ) -> AutomatonBase:
     """Return a mate from ``pool`` using tournament selection.
 
@@ -29,8 +30,8 @@ def _tournament_select(
     """
     n = len(pool)
     if k <= 1 or selector is None or selector.fingerprint is None or n <= 1:
-        return pool[randrange(n)]
-    candidates = [pool[randrange(n)] for _ in range(k)]
+        return pool[rng.randrange(n)]
+    candidates = [pool[rng.randrange(n)] for _ in range(k)]
     sel_fp = selector.fingerprint
     return min(
         candidates,
@@ -50,12 +51,16 @@ class Population(Checkpointable):
         environment: Environment,
         checkpoint_config: CheckpointConfig | None = None,
         fingerprint_config: FingerprintConfig | None = None,
+        seed: int | None = None,
     ) -> None:
         self._automata_class = AutomatonClass
         self._fingerprint_config = fingerprint_config
+        self._rng = Random(seed)
         self.automata = [
             AutomatonClass(
-                environment=environment, fingerprint_config=fingerprint_config
+                environment=environment,
+                fingerprint_config=fingerprint_config,
+                seed=self._rng.randint(0, 2**32 - 1),
             )
             for _ in range(size)
         ]
@@ -161,13 +166,15 @@ class Population(Checkpointable):
             tuple[AutomatonBase, AutomatonBase, AutomatonBase, float, float]
         ] = []
         for i in range(len(self.automata) // 2):
-            parent1 = _tournament_select(breeding_pool, None, k)
+            parent1 = _tournament_select(breeding_pool, None, k, self._rng)
             assert isinstance(parent1.genetic_code, GeneticCode)
-            parent2 = _tournament_select(breeding_pool, parent1, k)
+            parent2 = _tournament_select(breeding_pool, parent1, k, self._rng)
             assert isinstance(parent2.genetic_code, GeneticCode)
             child_genetic_code = parent1.genetic_code.crossover(parent2.genetic_code)
             child = self._automata_class(
-                genetic_code=child_genetic_code, environment=self.environment
+                genetic_code=child_genetic_code,
+                environment=self.environment,
+                seed=self._rng.randint(0, 2**32 - 1),
             )
             # Cross over and mutate the fingerprint if active.
             if (

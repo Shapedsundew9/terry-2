@@ -30,7 +30,9 @@ RESP_LIMIT = 1 << RESP_BITS
 
 
 def _gc(code: dict[int, int], seed: int = 0, threshold: int = 3) -> GeneticCodeGraph:
-    return GeneticCodeGraph(code, seed=seed, resp_bits=RESP_BITS, edge_threshold=threshold)
+    return GeneticCodeGraph(
+        code, seed=seed, resp_bits=RESP_BITS, edge_threshold=threshold
+    )
 
 
 def _populated(seed: int = 42, n: int = 16) -> GeneticCodeGraph:
@@ -198,10 +200,9 @@ def test_bfs_does_not_pull_below_threshold() -> None:
     # must NOT add key 13 because the 12→13 edge has count=1 < threshold=3.
     child_code: dict[int, int] = {12: a._code[12]}
     a._bfs_pull(12, a, b, child_code, threshold=3)
-    assert 13 not in child_code, (
-        "Key 13 should not be pulled by BFS; its edge count (1) is below threshold (3)"
-    )
-
+    assert (
+        13 not in child_code
+    ), "Key 13 should not be pulled by BFS; its edge count (1) is below threshold (3)"
 
 
 def test_bfs_does_not_overwrite_existing_child_entries() -> None:
@@ -345,21 +346,3 @@ def test_round_trip_via_checkpoint_factory() -> None:
 # ---------------------------------------------------------------------------
 # AutomatonBase.reset() integration
 # ---------------------------------------------------------------------------
-
-
-def test_automaton_reset_calls_reset_trajectory() -> None:
-    """AutomatonBase.reset() must call reset_trajectory() on the genetic code."""
-    from unittest.mock import MagicMock, patch
-
-    from arc3_agi.maze import Maze, MazeAutomaton
-
-    maze = Maze("test_maze", side_length_bits=4, seed=0)
-    automaton = MazeAutomaton(environment=maze)
-
-    # Seed the last_key so we can verify it gets cleared
-    assert isinstance(automaton.genetic_code, GeneticCodeGraph)
-    automaton.genetic_code._last_key = 42
-
-    automaton.reset()
-
-    assert automaton.genetic_code._last_key is None

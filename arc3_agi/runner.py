@@ -287,13 +287,16 @@ def launch_populations(
     configs: list[PopulationConfig],
     max_generations: int,
     base_dir: Path = Path("runs"),
+    *,
+    run_id: str | None = None,
+    start_pop_id: int = 0,
 ) -> list[PopulationHandle]:
     """Spawn one background OS process per config and return handles immediately.
 
     Populations are fully isolated: each runs in its own subprocess with its
     own memory space.  Checkpoints are written to::
 
-        <base_dir>/<run_id>/pop_<i>/
+        <base_dir>/<run_id>/pop_<start_pop_id + i>/
 
     where ``run_id`` is a unique identifier for this batch (ISO timestamp +
     random hex suffix to avoid collisions when multiple batches start within
@@ -308,6 +311,17 @@ def launch_populations(
         Number of tick/evolve cycles each population runs before stopping.
     base_dir:
         Root directory under which per-batch run folders are created.
+    run_id:
+        Optional run identifier string.  When *None* (the default) a fresh
+        identifier is generated automatically.  Pass an explicit value to
+        group multiple :func:`launch_populations` calls under one shared
+        run directory (e.g. when launching populations one-at-a-time from a
+        pool manager).
+    start_pop_id:
+        Zero-based offset applied to directory names and
+        :attr:`PopulationHandle.population_id` values.  The *i*-th config
+        in *configs* gets id ``start_pop_id + i`` and writes checkpoints to
+        ``pop_<start_pop_id + i>/``.  Defaults to 0 (existing behaviour).
         Created automatically if it does not exist.
 
     Returns
@@ -315,20 +329,22 @@ def launch_populations(
     list[PopulationHandle]
         One handle per config, in the same order as *configs*.
     """
-    run_id = datetime.now().strftime("%Y%m%dT%H%M%S") + "_" + secrets.token_hex(3)
+    if run_id is None:
+        run_id = datetime.now().strftime("%Y%m%dT%H%M%S") + "_" + secrets.token_hex(3)
     handles: list[PopulationHandle] = []
 
     for i, config in enumerate(configs):
-        pop_dir = base_dir / run_id / f"pop_{i}"
+        pop_id = start_pop_id + i
+        pop_dir = base_dir / run_id / f"pop_{pop_id}"
         q: multiprocessing.Queue[dict[str, Any]] = multiprocessing.Queue()
         p = multiprocessing.Process(
             target=_worker_fn,
-            args=(config, max_generations, pop_dir, i, q, config.seed),
+            args=(config, max_generations, pop_dir, pop_id, q, config.seed),
             daemon=True,
-            name=f"pop-{run_id}-{i}",
+            name=f"pop-{run_id}-{pop_id}",
         )
         p.start()
-        handles.append(PopulationHandle(i, p, q))
+        handles.append(PopulationHandle(pop_id, p, q))
 
     return handles
 

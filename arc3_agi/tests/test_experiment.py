@@ -98,4 +98,13 @@ def test_run_experiment1_closes_db_while_pool_runs(
     )
 
     assert returned_id == 7
-    assert events == ["open", "check", "close", "run_pool", "open", "create", "ingest", "close"]
+    assert events == [
+        "open",
+        "check",
+        "close",
+        "run_pool",
+        "open",
+        "create",
+        "ingest",
+        "close",
+    ]

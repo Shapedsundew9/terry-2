@@ -114,6 +114,20 @@ class ExperimentStore:
         ).fetchone()
         return int(row[0])  # type: ignore[index]
 
+    def get_experiment_id_by_name(self, name: str) -> int | None:
+        """Return the id for an existing experiment named *name*, if any."""
+        row = self._conn.execute(
+            """
+            SELECT id
+            FROM experiments
+            WHERE name = ?
+            ORDER BY id
+            LIMIT 1
+            """,
+            [name],
+        ).fetchone()
+        return int(row[0]) if row is not None else None
+
     def ingest_run(self, experiment_id: int, run_dir: Path | str) -> int:
         """Read all ``fitness_history.json`` files under *run_dir* and insert
         their generation stats into the database.

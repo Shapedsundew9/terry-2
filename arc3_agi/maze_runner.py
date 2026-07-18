@@ -516,9 +516,18 @@ def run_experiment1(
     Returns
     -------
     int
-        The experiment id assigned in the database.
+        The experiment id assigned in the database, or the existing id when
+        an experiment with the same name has already been recorded.
     """
     with ExperimentStore(db_path) as store:
+        existing_id = store.get_experiment_id_by_name(name)
+        if existing_id is not None:
+            print(
+                f"\nExperiment '{name}' already exists → id={existing_id}; "
+                "skipping run."
+            )
+            return existing_id
+
         snapshots, run_id, run_dir = run_pool(base_dir=base_dir)
         experiment_id = store.create_experiment(
             name=name,

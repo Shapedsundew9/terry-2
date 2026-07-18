@@ -302,6 +302,21 @@ class PopulationHandle:
         """
         self._process.join(timeout)
 
+    def terminate(self) -> None:
+        """Ask the subprocess to terminate if it is still running."""
+        if self._process.is_alive():
+            self._process.terminate()
+
+    def kill(self) -> None:
+        """Forcibly kill the subprocess if it is still running."""
+        if self._process.is_alive():
+            self._process.kill()
+
+    def close(self) -> None:
+        """Release local queue resources owned by this handle."""
+        self._queue.close()
+        self._queue.join_thread()
+
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -391,3 +406,23 @@ def wait_all(
     """
     for handle in handles:
         handle.wait(timeout)
+
+
+def stop_all(
+    handles: list[PopulationHandle],
+    timeout: float | None = 5.0,
+) -> None:
+    """Terminate every running population and wait for subprocess cleanup."""
+    for handle in handles:
+        handle.terminate()
+
+    for handle in handles:
+        handle.wait(timeout)
+
+    for handle in handles:
+        if handle.is_running:
+            handle.kill()
+
+    for handle in handles:
+        handle.wait(timeout)
+        handle.close()

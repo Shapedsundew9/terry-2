@@ -38,6 +38,7 @@ from arc3_agi.runner import (
     PopulationConfig,
     PopulationHandle,
     launch_populations,
+    stop_all,
     wait_all,
 )
 
@@ -310,16 +311,20 @@ def run(base_dir: Path = BASE_DIR) -> list[PopulationHandle]:
         handles, MAX_GENERATIONS, elapsed_s=0.0, first=True, tty=tty
     )
 
-    while any(h.is_running for h in handles):
-        time.sleep(POLL_INTERVAL_S)
-        prev_lines = _print_progress(
-            handles,
-            MAX_GENERATIONS,
-            elapsed_s=time.monotonic() - t0,
-            first=False,
-            tty=tty,
-            prev_lines=prev_lines,
-        )
+    try:
+        while any(h.is_running for h in handles):
+            time.sleep(POLL_INTERVAL_S)
+            prev_lines = _print_progress(
+                handles,
+                MAX_GENERATIONS,
+                elapsed_s=time.monotonic() - t0,
+                first=False,
+                tty=tty,
+                prev_lines=prev_lines,
+            )
+    except BaseException:
+        stop_all(handles)
+        raise
 
     # Final update after all processes have exited.
     _print_progress(
@@ -423,39 +428,43 @@ def run_pool(
         completed_snapshots=completed_snapshots,
     )
 
-    while active:
-        time.sleep(POLL_INTERVAL_S)
+    try:
+        while active:
+            time.sleep(POLL_INTERVAL_S)
 
-        still_running: list[PopulationHandle] = []
-        for h in active:
-            if h.is_running:
-                still_running.append(h)
-            else:
-                # Drain the final progress snapshot before discarding the handle.
-                completed_snapshots.append(h.progress)
-                # Backfill the freed slot if the quota is not yet met.
-                if next_id < TOTAL_POPULATIONS:
-                    config = _build_config(next_id, maze)
-                    [new_handle] = launch_populations(
-                        [config],
-                        max_generations=MAX_GENERATIONS,
-                        base_dir=base_dir,
-                        run_id=run_id,
-                        start_pop_id=next_id,
-                    )
-                    still_running.append(new_handle)
-                    next_id += 1
+            still_running: list[PopulationHandle] = []
+            for h in active:
+                if h.is_running:
+                    still_running.append(h)
+                else:
+                    # Drain the final progress snapshot before discarding the handle.
+                    completed_snapshots.append(h.progress)
+                    # Backfill the freed slot if the quota is not yet met.
+                    if next_id < TOTAL_POPULATIONS:
+                        config = _build_config(next_id, maze)
+                        [new_handle] = launch_populations(
+                            [config],
+                            max_generations=MAX_GENERATIONS,
+                            base_dir=base_dir,
+                            run_id=run_id,
+                            start_pop_id=next_id,
+                        )
+                        still_running.append(new_handle)
+                        next_id += 1
 
-        active = still_running
-        prev_lines = _print_progress(
-            active,
-            MAX_GENERATIONS,
-            elapsed_s=time.monotonic() - t0,
-            first=False,
-            tty=tty,
-            prev_lines=prev_lines,
-            completed_snapshots=completed_snapshots,
-        )
+            active = still_running
+            prev_lines = _print_progress(
+                active,
+                MAX_GENERATIONS,
+                elapsed_s=time.monotonic() - t0,
+                first=False,
+                tty=tty,
+                prev_lines=prev_lines,
+                completed_snapshots=completed_snapshots,
+            )
+    except BaseException:
+        stop_all(active)
+        raise
 
     # Final progress update after the last population finishes.
     _print_progress(
@@ -528,7 +537,9 @@ def run_experiment1(
             )
             return existing_id
 
-        snapshots, run_id, run_dir = run_pool(base_dir=base_dir)
+    snapshots, run_id, run_dir = run_pool(base_dir=base_dir)
+
+    with ExperimentStore(db_path) as store:
         experiment_id = store.create_experiment(
             name=name,
             description=description,

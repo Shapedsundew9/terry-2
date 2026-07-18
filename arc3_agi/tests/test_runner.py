@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+import multiprocessing
 from pathlib import Path
 
 import pytest
@@ -14,6 +15,7 @@ from arc3_agi.runner import (
     PopulationConfig,
     PopulationHandle,
     launch_populations,
+    stop_all,
     wait_all,
 )
 
@@ -25,6 +27,10 @@ SIDE_BITS = 4  # 16×16 maze — fast to generate and traverse
 MAX_GEN = 3
 TICKS = 10
 POP_SIZE = 10
+
+
+def _wait_forever(event: multiprocessing.Event) -> None:
+    event.wait()
 
 
 @pytest.fixture
@@ -249,3 +255,20 @@ class TestWaitAll:
     def test_empty_list(self) -> None:
         """wait_all on an empty list should not raise."""
         wait_all([])
+
+
+class TestStopAll:
+    def test_terminates_running_processes(self) -> None:
+        event = multiprocessing.Event()
+        queue: multiprocessing.Queue = multiprocessing.Queue()
+        process = multiprocessing.Process(
+            target=_wait_forever,
+            args=(event,),
+            daemon=True,
+        )
+        process.start()
+        handle = PopulationHandle(0, process, queue)
+
+        stop_all([handle], timeout=1.0)
+
+        assert not handle.is_running

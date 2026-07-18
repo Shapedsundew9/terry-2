@@ -53,7 +53,7 @@ When :func:`run_pool` is used, populations are launched and replaced until
 exactly this many have completed.  Has no effect on :func:`run`.
 """
 
-MAX_GENERATIONS: int = 1000
+MAX_GENERATIONS: int = 10000
 """Total number of tick/evolve cycles each population runs before stopping."""
 
 TICKS_PER_RESTART: int = 100
@@ -334,7 +334,11 @@ def run(base_dir: Path = BASE_DIR) -> list[PopulationHandle]:
     return handles
 
 
-def run_pool(base_dir: Path = BASE_DIR) -> list[dict]:
+def run_pool(
+    base_dir: Path = BASE_DIR,
+    *,
+    run_id: str | None = None,
+) -> tuple[list[dict], str, Path]:
     """Launch :data:`TOTAL_POPULATIONS` populations with a concurrency cap.
 
     Runs :data:`TOTAL_POPULATIONS` independent populations in total, but keeps
@@ -354,12 +358,17 @@ def run_pool(base_dir: Path = BASE_DIR) -> list[dict]:
     ----------
     base_dir:
         Root directory for checkpoint output.  Defaults to :data:`BASE_DIR`.
+    run_id:
+        Optional pre-supplied run identifier.  When ``None`` (the default) a
+        unique id is generated from the current timestamp and random hex.
 
     Returns
     -------
-    list[dict]
-        Final progress snapshot (from :attr:`~arc3_agi.runner.PopulationHandle.progress`)
-        for every completed population, in the order they finished.
+    tuple[list[dict], str, Path]
+        ``(snapshots, run_id, run_dir)`` where *snapshots* is the final
+        progress snapshot for every completed population (in completion order),
+        *run_id* is the identifier used for this run, and *run_dir* is the
+        absolute path to the run's checkpoint directory.
     """
     import secrets as _secrets
     from datetime import datetime as _datetime
@@ -371,7 +380,8 @@ def run_pool(base_dir: Path = BASE_DIR) -> list[dict]:
     )
 
     # One shared run_id groups all checkpoint directories under a single folder.
-    run_id = _datetime.now().strftime("%Y%m%dT%H%M%S") + "_" + _secrets.token_hex(3)
+    if run_id is None:
+        run_id = _datetime.now().strftime("%Y%m%dT%H%M%S") + "_" + _secrets.token_hex(3)
 
     print(
         f"\nMaze Runner (pool) — {TOTAL_POPULATIONS} total × {MAX_PARALLEL} parallel "
@@ -461,7 +471,81 @@ def run_pool(base_dir: Path = BASE_DIR) -> list[dict]:
         f"\nAll {TOTAL_POPULATIONS} populations finished in {total_s:.1f}s "
         f"({total_s / TOTAL_POPULATIONS:.1f}s avg per population)."
     )
-    return completed_snapshots
+    run_dir = base_dir / run_id
+    return completed_snapshots, run_id, run_dir
+
+
+# ---------------------------------------------------------------------------
+# Experiment entry point
+# ---------------------------------------------------------------------------
+
+
+DEFAULT_DB_PATH: Path = Path("experiments") / "runs.duckdb"
+"""Default path for the experiment DuckDB database."""
+
+
+def run_experiment(
+    name: str,
+    description: str = "",
+    base_dir: Path = BASE_DIR,
+    db_path: Path = DEFAULT_DB_PATH,
+) -> int:
+    """Run a full pool experiment, persist results, and return the experiment id.
+
+    Calls :func:`run_pool` and then ingests all per-population
+    ``fitness_history.json`` files into the experiment database so the run
+    can be queried and plotted in the analysis notebook.
+
+    Parameters
+    ----------
+    name:
+        Short human-readable experiment name, e.g. ``"baseline"``.
+    description:
+        Free-text description of the experiment's purpose and parameters.
+    base_dir:
+        Root directory for checkpoint output.  Defaults to :data:`BASE_DIR`.
+    db_path:
+        Path to the DuckDB experiment database.  Created automatically if it
+        does not exist.  Defaults to :data:`DEFAULT_DB_PATH`.
+
+    Returns
+    -------
+    int
+        The experiment id assigned in the database.
+    """
+    from arc3_agi.experiment import ExperimentStore
+
+    params = {
+        "total_populations": TOTAL_POPULATIONS,
+        "max_parallel": MAX_PARALLEL,
+        "max_generations": MAX_GENERATIONS,
+        "ticks_per_restart": TICKS_PER_RESTART,
+        "restarts_per_gen": RESTARTS_PER_GEN,
+        "population_size": POPULATION_SIZE,
+        "side_length_bits": SIDE_LENGTH_BITS,
+        "maze_seed": MAZE_SEED,
+        "population_seed": POPULATION_SEED,
+        "fingerprint_bits": FINGERPRINT_BITS,
+        "fingerprint_tournament_k": FINGERPRINT_TOURNAMENT_K,
+        "checkpoint_interval": CHECKPOINT_INTERVAL,
+    }
+
+    with ExperimentStore(db_path) as store:
+        snapshots, run_id, run_dir = run_pool(base_dir)
+        experiment_id = store.create_experiment(
+            name=name,
+            description=description,
+            run_id=run_id,
+            params=params,
+        )
+        n_rows = store.ingest_run(experiment_id, run_dir)
+
+    print(
+        f"\nExperiment '{name}' saved → id={experiment_id}  "
+        f"({n_rows} generation-stat rows across {len(snapshots)} populations)"
+        f"\n  DB: {Path(db_path).resolve()}"
+    )
+    return experiment_id
 
 
 # ---------------------------------------------------------------------------
@@ -469,4 +553,6 @@ def run_pool(base_dir: Path = BASE_DIR) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    run_pool()
+    print(
+        f"EXPERIMENT_ID = {run_experiment(name='baseline', description='Baseline maze evolution run.')}"
+    )

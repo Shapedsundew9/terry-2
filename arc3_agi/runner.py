@@ -39,6 +39,7 @@ Usage example::
 
 from __future__ import annotations
 
+import json
 import math
 import multiprocessing
 import random
@@ -158,6 +159,7 @@ def _worker_fn(
             generation_interval=user_ckpt.generation_interval,
         )
 
+    population: Population | None = None
     try:
         population = Population(
             size=config.size,
@@ -185,6 +187,29 @@ def _worker_fn(
     except Exception as exc:  # noqa: BLE001
         queue.put({"error": str(exc), "is_running": False})
         raise
+    finally:
+        # Write aggregate fitness history to disk so the experiment store can
+        # ingest it regardless of whether checkpoints were taken.
+        if population is not None and population.fitness_history:
+            history_path = pop_dir / "fitness_history.json"
+            history_path.parent.mkdir(parents=True, exist_ok=True)
+            with history_path.open("w") as _fh:
+                json.dump(
+                    {
+                        "pop_id": pop_id,
+                        "history": [
+                            {
+                                "generation": e["generation"],
+                                "min_fitness": e["min_fitness"],
+                                "max_fitness": e["max_fitness"],
+                                "mean_fitness": e["mean_fitness"],
+                                "duration_s": e["duration_s"],
+                            }
+                            for e in population.fitness_history
+                        ],
+                    },
+                    _fh,
+                )
 
 
 # ---------------------------------------------------------------------------

@@ -28,8 +28,10 @@ import math
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 from arc3_agi.checkpoint import CheckpointConfig
+from arc3_agi.experiment import ExperimentStore
 from arc3_agi.fingerprint import FingerprintConfig
 from arc3_agi.maze import Maze, MazeAutomaton
 from arc3_agi.runner import (
@@ -86,7 +88,7 @@ FINGERPRINT_BITS: int = 4
 FINGERPRINT_TOURNAMENT_K: int = 4
 """Tournament size for fingerprint-guided mate selection."""
 
-CHECKPOINT_INTERVAL: int = 1000
+CHECKPOINT_INTERVAL: int = MAX_GENERATIONS
 """Write a checkpoint every this many generations (0 = disable)."""
 
 POLL_INTERVAL_S: float = 2.0
@@ -484,8 +486,9 @@ DEFAULT_DB_PATH: Path = Path("experiments") / "runs.duckdb"
 """Default path for the experiment DuckDB database."""
 
 
-def run_experiment(
+def run_experiment1(
     name: str,
+    params: dict[str, Any],
     description: str = "",
     base_dir: Path = BASE_DIR,
     db_path: Path = DEFAULT_DB_PATH,
@@ -500,6 +503,8 @@ def run_experiment(
     ----------
     name:
         Short human-readable experiment name, e.g. ``"baseline"``.
+    params:
+        Dictionary of experiment parameters to store in the database.
     description:
         Free-text description of the experiment's purpose and parameters.
     base_dir:
@@ -513,25 +518,8 @@ def run_experiment(
     int
         The experiment id assigned in the database.
     """
-    from arc3_agi.experiment import ExperimentStore
-
-    params = {
-        "total_populations": TOTAL_POPULATIONS,
-        "max_parallel": MAX_PARALLEL,
-        "max_generations": MAX_GENERATIONS,
-        "ticks_per_restart": TICKS_PER_RESTART,
-        "restarts_per_gen": RESTARTS_PER_GEN,
-        "population_size": POPULATION_SIZE,
-        "side_length_bits": SIDE_LENGTH_BITS,
-        "maze_seed": MAZE_SEED,
-        "population_seed": POPULATION_SEED,
-        "fingerprint_bits": FINGERPRINT_BITS,
-        "fingerprint_tournament_k": FINGERPRINT_TOURNAMENT_K,
-        "checkpoint_interval": CHECKPOINT_INTERVAL,
-    }
-
     with ExperimentStore(db_path) as store:
-        snapshots, run_id, run_dir = run_pool(base_dir)
+        snapshots, run_id, run_dir = run_pool(base_dir=base_dir)
         experiment_id = store.create_experiment(
             name=name,
             description=description,
@@ -553,6 +541,21 @@ def run_experiment(
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    print(
-        f"EXPERIMENT_ID = {run_experiment(name='baseline', description='Baseline maze evolution run.')}"
+
+    params = {
+        "total_populations": TOTAL_POPULATIONS,
+        "max_parallel": MAX_PARALLEL,
+        "max_generations": MAX_GENERATIONS,
+        "ticks_per_restart": TICKS_PER_RESTART,
+        "restarts_per_gen": RESTARTS_PER_GEN,
+        "population_size": POPULATION_SIZE,
+        "side_length_bits": SIDE_LENGTH_BITS,
+        "maze_seed": MAZE_SEED,
+        "population_seed": POPULATION_SEED,
+        "fingerprint_bits": FINGERPRINT_BITS,
+        "fingerprint_tournament_k": FINGERPRINT_TOURNAMENT_K,
+        "checkpoint_interval": CHECKPOINT_INTERVAL,
+    }
+    run_experiment1(
+        name="baseline", params=params, description="Baseline maze evolution run."
     )

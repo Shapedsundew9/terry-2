@@ -70,12 +70,14 @@ class ExperimentStore:
     def __init__(self, db_path: Path | str = DEFAULT_DB_PATH) -> None:
         self._path = Path(db_path)
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn: duckdb.DuckDBPyConnection | None = duckdb.connect(str(self._path))
+        _conn: duckdb.DuckDBPyConnection | None = duckdb.connect(str(self._path))
         try:
-            self._conn.execute(_SCHEMA_SQL)
+            _conn.execute(_SCHEMA_SQL)
         except Exception:
-            self.close()
+            _conn.close()
             raise
+        assert _conn is not None
+        self._conn: duckdb.DuckDBPyConnection = _conn
 
     # ------------------------------------------------------------------
     # Public API
@@ -239,7 +241,6 @@ class ExperimentStore:
         """Close the underlying DuckDB connection."""
         if self._conn is not None:
             self._conn.close()
-            self._conn = None
 
     def __enter__(self) -> "ExperimentStore":
         return self

@@ -223,9 +223,9 @@ class MazeAutomaton(AutomatonISBase):
         super().__init__(
             name=kwargs.get("name", "Terry-2"),
             genetic_code=kwargs.get("genetic_code", None),
-            env_bits=9,
-            state_bits=4,
-            resp_bits=2,
+            env_bits=kwargs.get("env_bits", 9),
+            state_bits=kwargs.get("state_bits", 4),
+            resp_bits=kwargs.get("resp_bits", 2),
             environment=kwargs.get("environment"),
             fingerprint_config=kwargs.get("fingerprint_config", None),
             seed=kwargs.get("seed", None),

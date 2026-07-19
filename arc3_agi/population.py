@@ -51,16 +51,19 @@ class Population(Checkpointable):
         environment: Environment,
         checkpoint_config: CheckpointConfig | None = None,
         fingerprint_config: FingerprintConfig | None = None,
+        automaton_params: dict[str, Any] | None = None,
         seed: int | None = None,
     ) -> None:
         self._automata_class = AutomatonClass
         self._fingerprint_config = fingerprint_config
+        self._automaton_params = dict(automaton_params or {})
         self._rng = Random(seed)
         self.automata = [
             AutomatonClass(
                 environment=environment,
                 fingerprint_config=fingerprint_config,
                 seed=self._rng.randint(0, 2**32 - 1),
+                **self._automaton_params,
             )
             for _ in range(size)
         ]
@@ -210,6 +213,7 @@ class Population(Checkpointable):
                 genetic_code=child_genetic_code,
                 environment=self.environment,
                 seed=self._rng.randint(0, 2**32 - 1),
+                **self._automaton_params,
             )
             # Cross over and mutate the fingerprint if active.
             if (
@@ -289,6 +293,7 @@ class Population(Checkpointable):
                 if self._fingerprint_config is not None
                 else {}
             ),
+            "automaton_params": self._automaton_params,
             "fitness_history": [
                 {
                     "generation": e["generation"],
@@ -351,6 +356,8 @@ class Population(Checkpointable):
         pop = cls.__new__(cls)
         pop._automata_class = AutomatonClass
         pop._fingerprint_config = fp_cfg
+        pop._automaton_params = dict(d.get("automaton_params", {}))
+        pop._rng = Random(kwargs.get("seed", None))
         pop.environment = environment
         pop.tick_count = meta["tick_count"]
         pop.generation = meta["generation"]

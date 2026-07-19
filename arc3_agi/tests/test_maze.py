@@ -82,6 +82,16 @@ def test_turn_actions_rotate_orientation() -> None:
     assert auto.coords[2] == Maze.Orientation.RIGHT.value
 
 
+def test_maze_automaton_accepts_bit_params() -> None:
+    maze = Maze("m", 4, seed=1)
+    auto = MazeAutomaton(environment=maze, state_bits=6, resp_bits=3)
+
+    assert auto.env_bits == 9
+    assert auto.state_bits == 6
+    assert auto.resp_bits == 3
+    assert auto.genetic_code.resp_bits == 9
+
+
 def test_move_into_border_wall_fails() -> None:
     maze = Maze("m", 4, seed=1)
     cell = next(((x, y) for (x, y) in maze.free if x == 1), None)

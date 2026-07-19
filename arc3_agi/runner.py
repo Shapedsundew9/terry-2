@@ -44,7 +44,7 @@ import math
 import multiprocessing
 import random
 import secrets
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from queue import Empty
@@ -86,6 +86,8 @@ class PopulationConfig:
                           subdirectory; ``enabled`` and ``generation_interval``
                           are preserved as supplied.
         fingerprint_config: Optional fingerprint / mate-selection settings.
+        automaton_params: Optional keyword arguments forwarded to every
+                          automaton constructor in this population.
     """
 
     size: int
@@ -95,6 +97,7 @@ class PopulationConfig:
     restarts_per_gen: int = 1
     checkpoint_config: CheckpointConfig | None = None
     fingerprint_config: FingerprintConfig | None = None
+    automaton_params: dict[str, Any] = field(default_factory=dict)
     seed: int | None = None
     """Optional integer seed for fully deterministic, reproducible evolution.
 
@@ -167,6 +170,7 @@ def _worker_fn(
             environment=config.environment,
             checkpoint_config=ckpt,
             fingerprint_config=config.fingerprint_config,
+            automaton_params=config.automaton_params,
             seed=seed,
         )
 

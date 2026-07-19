@@ -83,11 +83,20 @@ POPULATION_SEED: int = 0
 Set to ``None`` to use OS entropy (non-deterministic).
 """
 
+FINGERPRINT_ENABLED: bool = False
+"""Whether to enable fingerprint-guided mate selection."""
+
 FINGERPRINT_BITS: int = 4
 """Bit-width of the selection fingerprint."""
 
 FINGERPRINT_TOURNAMENT_K: int = 4
 """Tournament size for fingerprint-guided mate selection."""
+
+FINGERPRINT_MUTATION_RATE: float = 0.01
+"""Per-bit mutation probability for inherited selection fingerprints."""
+
+AUTOMATON_PARAMS: dict[str, Any] = {"state_bits": 4}
+"""Keyword arguments forwarded to :class:`~arc3_agi.maze.MazeAutomaton`."""
 
 CHECKPOINT_INTERVAL: int = MAX_GENERATIONS
 """Write a checkpoint every this many generations (0 = disable)."""
@@ -117,15 +126,19 @@ def _format_table(
     max_generations: int,
     elapsed_s: float,
     completed_snapshots: list[dict] | None = None,
+    total_populations: int | None = None,
 ) -> list[str]:
     """Return a list of formatted status lines (one per population + header)."""
     done = sum(1 for h in handles if not h.is_running)
     if completed_snapshots is None:
         header = f"  Elapsed: {elapsed_s:6.0f}s   Finished: {done}/{len(handles)} populations"
     else:
+        total = (
+            total_populations if total_populations is not None else TOTAL_POPULATIONS
+        )
         header = (
             f"  Elapsed: {elapsed_s:6.0f}s   Active: {done}/{len(handles)} done"
-            f"   Completed: {len(completed_snapshots)}/{TOTAL_POPULATIONS} total"
+            f"   Completed: {len(completed_snapshots)}/{total} total"
         )
     lines: list[str] = [
         header,
@@ -172,6 +185,7 @@ def _format_table(
 
     # Summary row.
     lines.append("  " + "-" * 78)
+    total = total_populations if total_populations is not None else TOTAL_POPULATIONS
     if completed_snapshots:
         c_bm = [s.get("best_max_fitness", float("nan")) for s in completed_snapshots]
         c_bmn = [s.get("best_mean_fitness", float("nan")) for s in completed_snapshots]
@@ -180,7 +194,7 @@ def _format_table(
         avg_c_bm = sum(valid_bm) / len(valid_bm) if valid_bm else float("nan")
         avg_c_bmn = sum(valid_bmn) / len(valid_bmn) if valid_bmn else float("nan")
         lines.append(
-            f"  {'':>3}  Completed: {len(completed_snapshots)}/{TOTAL_POPULATIONS}"
+            f"  {'':>3}  Completed: {len(completed_snapshots)}/{total}"
             f"   avg best_max: {avg_c_bm:>9.3f}   avg best_mean: {avg_c_bmn:>9.3f}"
         )
     if n_valid:
@@ -207,12 +221,19 @@ def _print_progress(
     tty: bool,
     prev_lines: int = 0,
     completed_snapshots: list[dict] | None = None,
+    total_populations: int | None = None,
 ) -> int:
     """Render the progress table, overwriting previous output on a TTY.
 
     Returns the number of lines printed (so the next call can erase them).
     """
-    lines = _format_table(handles, max_generations, elapsed_s, completed_snapshots)
+    lines = _format_table(
+        handles,
+        max_generations,
+        elapsed_s,
+        completed_snapshots,
+        total_populations,
+    )
     if tty and not first and prev_lines:
         # Move cursor up to the start of the previous block and erase each line.
         sys.stdout.write(_CURSOR_UP.format(prev_lines))
@@ -230,30 +251,98 @@ def _print_progress(
 # ---------------------------------------------------------------------------
 
 
-def _build_config(pop_id: int, maze: Maze) -> PopulationConfig:
+def default_experiment_params() -> dict[str, Any]:
+    """Return the default experiment parameters derived from module constants."""
+    return {
+        "total_populations": TOTAL_POPULATIONS,
+        "max_parallel": MAX_PARALLEL,
+        "max_generations": MAX_GENERATIONS,
+        "ticks_per_restart": TICKS_PER_RESTART,
+        "restarts_per_gen": RESTARTS_PER_GEN,
+        "population_size": POPULATION_SIZE,
+        "side_length_bits": SIDE_LENGTH_BITS,
+        "maze_seed": MAZE_SEED,
+        "population_seed": POPULATION_SEED,
+        "fingerprint_enabled": FINGERPRINT_ENABLED,
+        "fingerprint_bits": FINGERPRINT_BITS,
+        "fingerprint_tournament_k": FINGERPRINT_TOURNAMENT_K,
+        "fingerprint_mutation_rate": FINGERPRINT_MUTATION_RATE,
+        "checkpoint_interval": CHECKPOINT_INTERVAL,
+        "poll_interval_s": POLL_INTERVAL_S,
+        "automaton_params": dict(AUTOMATON_PARAMS),
+    }
+
+
+def _resolve_experiment_params(params: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Merge caller-supplied experiment params over the module defaults."""
+    resolved = default_experiment_params()
+    if not params:
+        return resolved
+
+    for key, value in params.items():
+        if key == "automaton_params":
+            automaton_params = dict(resolved["automaton_params"])
+            if value is not None:
+                automaton_params.update(value)
+            resolved[key] = automaton_params
+        else:
+            resolved[key] = value
+    return resolved
+
+
+def _population_seed(pop_id: int, params: dict[str, Any]) -> int | None:
+    seed = params.get("population_seed")
+    return int(seed) + pop_id if seed is not None else None
+
+
+def _fingerprint_config(params: dict[str, Any]) -> FingerprintConfig | None:
+    if not params.get("fingerprint_enabled", False):
+        return None
+    return FingerprintConfig(
+        bits=int(params["fingerprint_bits"]),
+        tournament_k=int(params["fingerprint_tournament_k"]),
+        mutation_rate=float(
+            params.get("fingerprint_mutation_rate", FINGERPRINT_MUTATION_RATE)
+        ),
+    )
+
+
+def _build_config(
+    pop_id: int,
+    maze: Maze,
+    params: dict[str, Any] | None = None,
+) -> PopulationConfig:
     """Build a single :class:`~arc3_agi.runner.PopulationConfig` for *pop_id*.
 
-    The population's seed is ``POPULATION_SEED + pop_id`` (or ``None`` when
-    :data:`POPULATION_SEED` is ``None``), ensuring each population is fully
+    The population's seed is ``population_seed + pop_id`` (or ``None`` when
+    ``population_seed`` is ``None``), ensuring each population is fully
     reproducible yet independent.
     """
+    params = _resolve_experiment_params(params)
+    checkpoint_interval = int(params["checkpoint_interval"])
     ckpt_cfg = CheckpointConfig(
-        enabled=CHECKPOINT_INTERVAL > 0,
-        generation_interval=CHECKPOINT_INTERVAL,
+        enabled=checkpoint_interval > 0,
+        generation_interval=checkpoint_interval,
     )
     return PopulationConfig(
-        size=POPULATION_SIZE,
+        size=int(params["population_size"]),
         AutomatonClass=MazeAutomaton,
         environment=maze,
-        ticks_per_restart=TICKS_PER_RESTART,
-        restarts_per_gen=RESTARTS_PER_GEN,
+        ticks_per_restart=int(params["ticks_per_restart"]),
+        restarts_per_gen=int(params["restarts_per_gen"]),
         checkpoint_config=ckpt_cfg,
-        fingerprint_config=None,  # fp_cfg,
-        seed=POPULATION_SEED + pop_id if POPULATION_SEED is not None else None,
+        fingerprint_config=_fingerprint_config(params),
+        automaton_params=dict(params.get("automaton_params", {})),
+        seed=_population_seed(pop_id, params),
     )
 
 
-def build_configs(maze: Maze) -> list[PopulationConfig]:
+def build_configs(
+    maze: Maze,
+    params: dict[str, Any] | None = None,
+    *,
+    count: int | None = None,
+) -> list[PopulationConfig]:
     """Build :data:`MAX_PARALLEL` identical :class:`~arc3_agi.runner.PopulationConfig` objects.
 
     All populations share the same maze instance and hyperparameters.
@@ -270,10 +359,15 @@ def build_configs(maze: Maze) -> list[PopulationConfig]:
     list[PopulationConfig]
         ``MAX_PARALLEL`` configs ready to pass to :func:`~arc3_agi.runner.launch_populations`.
     """
-    return [_build_config(i, maze) for i in range(MAX_PARALLEL)]
+    params = _resolve_experiment_params(params)
+    n = int(params["max_parallel"]) if count is None else count
+    return [_build_config(i, maze, params) for i in range(n)]
 
 
-def run(base_dir: Path = BASE_DIR) -> list[PopulationHandle]:
+def run(
+    base_dir: Path = BASE_DIR,
+    params: dict[str, Any] | None = None,
+) -> list[PopulationHandle]:
     """Launch all populations, report live progress, and wait for completion.
 
     Parameters
@@ -286,37 +380,46 @@ def run(base_dir: Path = BASE_DIR) -> list[PopulationHandle]:
     list[PopulationHandle]
         One handle per population; all are finished when this function returns.
     """
+    params = _resolve_experiment_params(params)
+    max_parallel = int(params["max_parallel"])
+    max_generations = int(params["max_generations"])
+    ticks_per_restart = int(params["ticks_per_restart"])
+    restarts_per_gen = int(params["restarts_per_gen"])
+    checkpoint_interval = int(params["checkpoint_interval"])
+    poll_interval_s = float(params["poll_interval_s"])
     tty = _is_tty()
 
     maze = Maze(
-        name="MazeRunnerMaze", side_length_bits=SIDE_LENGTH_BITS, seed=MAZE_SEED
+        name="MazeRunnerMaze",
+        side_length_bits=int(params["side_length_bits"]),
+        seed=params["maze_seed"],
     )
-    configs = build_configs(maze)
+    configs = build_configs(maze, params, count=max_parallel)
 
     print(
-        f"\nMaze Runner — {MAX_PARALLEL} populations × {MAX_GENERATIONS} generations "
-        f"× {TICKS_PER_RESTART} ticks/restart × {RESTARTS_PER_GEN} restart(s)/gen\n"
+        f"\nMaze Runner — {max_parallel} populations × {max_generations} generations "
+        f"× {ticks_per_restart} ticks/restart × {restarts_per_gen} restart(s)/gen\n"
         f"  Maze: {maze.width}×{maze.height}  "
-        f"Population size: {POPULATION_SIZE}  "
-        f"Checkpoint every: {CHECKPOINT_INTERVAL} gens\n"
+        f"Population size: {int(params['population_size'])}  "
+        f"Checkpoint every: {checkpoint_interval} gens\n"
         f"  Checkpoints → {base_dir.resolve()}\n"
     )
 
     handles = launch_populations(
-        configs, max_generations=MAX_GENERATIONS, base_dir=base_dir
+        configs, max_generations=max_generations, base_dir=base_dir
     )
     t0 = time.monotonic()
 
     prev_lines = _print_progress(
-        handles, MAX_GENERATIONS, elapsed_s=0.0, first=True, tty=tty
+        handles, max_generations, elapsed_s=0.0, first=True, tty=tty
     )
 
     try:
         while any(h.is_running for h in handles):
-            time.sleep(POLL_INTERVAL_S)
+            time.sleep(poll_interval_s)
             prev_lines = _print_progress(
                 handles,
-                MAX_GENERATIONS,
+                max_generations,
                 elapsed_s=time.monotonic() - t0,
                 first=False,
                 tty=tty,
@@ -329,7 +432,7 @@ def run(base_dir: Path = BASE_DIR) -> list[PopulationHandle]:
     # Final update after all processes have exited.
     _print_progress(
         handles,
-        MAX_GENERATIONS,
+        max_generations,
         elapsed_s=time.monotonic() - t0,
         first=False,
         tty=tty,
@@ -337,7 +440,7 @@ def run(base_dir: Path = BASE_DIR) -> list[PopulationHandle]:
     )
 
     total_s = time.monotonic() - t0
-    print(f"\nAll {MAX_PARALLEL} populations finished in {total_s:.1f}s.")
+    print(f"\nAll {max_parallel} populations finished in {total_s:.1f}s.")
     return handles
 
 
@@ -345,6 +448,7 @@ def run_pool(
     base_dir: Path = BASE_DIR,
     *,
     run_id: str | None = None,
+    params: dict[str, Any] | None = None,
 ) -> tuple[list[dict], str, Path]:
     """Launch :data:`TOTAL_POPULATIONS` populations with a concurrency cap.
 
@@ -380,10 +484,21 @@ def run_pool(
     import secrets as _secrets
     from datetime import datetime as _datetime
 
+    params = _resolve_experiment_params(params)
+    total_populations = int(params["total_populations"])
+    max_parallel = int(params["max_parallel"])
+    max_generations = int(params["max_generations"])
+    ticks_per_restart = int(params["ticks_per_restart"])
+    restarts_per_gen = int(params["restarts_per_gen"])
+    population_size = int(params["population_size"])
+    checkpoint_interval = int(params["checkpoint_interval"])
+    poll_interval_s = float(params["poll_interval_s"])
     tty = _is_tty()
 
     maze = Maze(
-        name="MazeRunnerMaze", side_length_bits=SIDE_LENGTH_BITS, seed=MAZE_SEED
+        name="MazeRunnerMaze",
+        side_length_bits=int(params["side_length_bits"]),
+        seed=params["maze_seed"],
     )
 
     # One shared run_id groups all checkpoint directories under a single folder.
@@ -391,12 +506,12 @@ def run_pool(
         run_id = _datetime.now().strftime("%Y%m%dT%H%M%S") + "_" + _secrets.token_hex(3)
 
     print(
-        f"\nMaze Runner (pool) — {TOTAL_POPULATIONS} total × {MAX_PARALLEL} parallel "
-        f"× {MAX_GENERATIONS} generations "
-        f"× {TICKS_PER_RESTART} ticks/restart × {RESTARTS_PER_GEN} restart(s)/gen\n"
+        f"\nMaze Runner (pool) — {total_populations} total × {max_parallel} parallel "
+        f"× {max_generations} generations "
+        f"× {ticks_per_restart} ticks/restart × {restarts_per_gen} restart(s)/gen\n"
         f"  Maze: {maze.width}×{maze.height}  "
-        f"Population size: {POPULATION_SIZE}  "
-        f"Checkpoint every: {CHECKPOINT_INTERVAL} gens\n"
+        f"Population size: {population_size}  "
+        f"Checkpoint every: {checkpoint_interval} gens\n"
         f"  Run ID: {run_id}   Checkpoints → {base_dir.resolve()}\n"
     )
 
@@ -404,13 +519,13 @@ def run_pool(
     next_id: int = 0
     completed_snapshots: list[dict] = []
 
-    # Initial fill — launch min(MAX_PARALLEL, TOTAL_POPULATIONS) populations.
-    initial = min(MAX_PARALLEL, TOTAL_POPULATIONS)
+    # Initial fill — launch min(max_parallel, total_populations) populations.
+    initial = min(max_parallel, total_populations)
     for _ in range(initial):
-        config = _build_config(next_id, maze)
+        config = _build_config(next_id, maze, params)
         [handle] = launch_populations(
             [config],
-            max_generations=MAX_GENERATIONS,
+            max_generations=max_generations,
             base_dir=base_dir,
             run_id=run_id,
             start_pop_id=next_id,
@@ -421,16 +536,17 @@ def run_pool(
     t0 = time.monotonic()
     prev_lines = _print_progress(
         active,
-        MAX_GENERATIONS,
+        max_generations,
         elapsed_s=0.0,
         first=True,
         tty=tty,
         completed_snapshots=completed_snapshots,
+        total_populations=total_populations,
     )
 
     try:
         while active:
-            time.sleep(POLL_INTERVAL_S)
+            time.sleep(poll_interval_s)
 
             still_running: list[PopulationHandle] = []
             for h in active:
@@ -440,11 +556,11 @@ def run_pool(
                     # Drain the final progress snapshot before discarding the handle.
                     completed_snapshots.append(h.progress)
                     # Backfill the freed slot if the quota is not yet met.
-                    if next_id < TOTAL_POPULATIONS:
-                        config = _build_config(next_id, maze)
+                    if next_id < total_populations:
+                        config = _build_config(next_id, maze, params)
                         [new_handle] = launch_populations(
                             [config],
-                            max_generations=MAX_GENERATIONS,
+                            max_generations=max_generations,
                             base_dir=base_dir,
                             run_id=run_id,
                             start_pop_id=next_id,
@@ -455,12 +571,13 @@ def run_pool(
             active = still_running
             prev_lines = _print_progress(
                 active,
-                MAX_GENERATIONS,
+                max_generations,
                 elapsed_s=time.monotonic() - t0,
                 first=False,
                 tty=tty,
                 prev_lines=prev_lines,
                 completed_snapshots=completed_snapshots,
+                total_populations=total_populations,
             )
     except BaseException:
         stop_all(active)
@@ -469,18 +586,20 @@ def run_pool(
     # Final progress update after the last population finishes.
     _print_progress(
         active,
-        MAX_GENERATIONS,
+        max_generations,
         elapsed_s=time.monotonic() - t0,
         first=False,
         tty=tty,
         prev_lines=prev_lines,
         completed_snapshots=completed_snapshots,
+        total_populations=total_populations,
     )
 
     total_s = time.monotonic() - t0
+    avg_s = total_s / total_populations if total_populations else 0.0
     print(
-        f"\nAll {TOTAL_POPULATIONS} populations finished in {total_s:.1f}s "
-        f"({total_s / TOTAL_POPULATIONS:.1f}s avg per population)."
+        f"\nAll {total_populations} populations finished in {total_s:.1f}s "
+        f"({avg_s:.1f}s avg per population)."
     )
     run_dir = base_dir / run_id
     return completed_snapshots, run_id, run_dir
@@ -495,7 +614,7 @@ DEFAULT_DB_PATH: Path = Path("experiments") / "runs.duckdb"
 """Default path for the experiment DuckDB database."""
 
 
-def run_experiment1(
+def run_experiment(
     name: str,
     params: dict[str, Any],
     description: str = "",
@@ -537,7 +656,8 @@ def run_experiment1(
             )
             return existing_id
 
-    snapshots, run_id, run_dir = run_pool(base_dir=base_dir)
+    params = _resolve_experiment_params(params)
+    snapshots, run_id, run_dir = run_pool(base_dir=base_dir, params=params)
 
     with ExperimentStore(db_path) as store:
         experiment_id = store.create_experiment(
@@ -562,20 +682,21 @@ def run_experiment1(
 
 if __name__ == "__main__":
 
-    params = {
-        "total_populations": TOTAL_POPULATIONS,
-        "max_parallel": MAX_PARALLEL,
-        "max_generations": MAX_GENERATIONS,
-        "ticks_per_restart": TICKS_PER_RESTART,
-        "restarts_per_gen": RESTARTS_PER_GEN,
-        "population_size": POPULATION_SIZE,
-        "side_length_bits": SIDE_LENGTH_BITS,
-        "maze_seed": MAZE_SEED,
-        "population_seed": POPULATION_SEED,
-        "fingerprint_bits": FINGERPRINT_BITS,
-        "fingerprint_tournament_k": FINGERPRINT_TOURNAMENT_K,
-        "checkpoint_interval": CHECKPOINT_INTERVAL,
-    }
-    run_experiment1(
-        name="baseline", params=params, description="Baseline maze evolution run."
+    params = default_experiment_params()
+    run_experiment(
+        name="baseline-state4",
+        params=params,
+        description="Baseline maze evolution run.",
+    )
+    params["automaton_params"]["state_bits"] = 3
+    run_experiment(
+        name="baseline-state3",
+        params=params,
+        description="Baseline maze evolution run with 3 state bits.",
+    )
+    params["automaton_params"]["state_bits"] = 5
+    run_experiment(
+        name="baseline-state5",
+        params=params,
+        description="Baseline maze evolution run with 5 state bits.",
     )

@@ -262,6 +262,57 @@ def _make_population(
     return Population(size, MazeAutomaton, maze, checkpoint_config=cfg)
 
 
+def test_population_forwards_automaton_params_to_initial_and_offspring(
+    maze: Maze,
+) -> None:
+    pop = Population(
+        4,
+        MazeAutomaton,
+        maze,
+        checkpoint_config=CheckpointConfig(enabled=False),
+        automaton_params={"state_bits": 6, "resp_bits": 3},
+    )
+
+    assert all(a.state_bits == 6 for a in pop.automata)
+    assert all(a.resp_bits == 3 for a in pop.automata)
+
+    for i, automaton in enumerate(pop.automata):
+        automaton.fitness = float(i + 1)
+    pop.evolve()
+
+    assert all(a.state_bits == 6 for a in pop.automata)
+    assert all(a.resp_bits == 3 for a in pop.automata)
+
+
+def test_population_round_trip_preserves_automaton_params_for_offspring(
+    tmp_path: Path,
+    maze: Maze,
+) -> None:
+    params = {"state_bits": 6, "resp_bits": 3}
+    pop = Population(
+        4,
+        MazeAutomaton,
+        maze,
+        checkpoint_config=CheckpointConfig(enabled=False),
+        automaton_params=params,
+    )
+
+    pop.save(tmp_path / "pop_custom_params")
+    restored = Population.load(
+        tmp_path / "pop_custom_params",
+        environment=maze,
+        AutomatonClass=MazeAutomaton,
+    )
+
+    assert restored._automaton_params == params
+    for i, automaton in enumerate(restored.automata):
+        automaton.fitness = float(i + 1)
+    restored.evolve()
+
+    assert all(a.state_bits == 6 for a in restored.automata)
+    assert all(a.resp_bits == 3 for a in restored.automata)
+
+
 def test_population_round_trip(tmp_path: Path, maze: Maze) -> None:
     pop = _make_population(maze, size=4)
     # Simulate two generations of evolution.

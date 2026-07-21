@@ -273,15 +273,15 @@ def test_population_forwards_automaton_params_to_initial_and_offspring(
         automaton_params={"state_bits": 6, "resp_bits": 3},
     )
 
-    assert all(a.state_bits == 6 for a in pop.automata)
-    assert all(a.resp_bits == 3 for a in pop.automata)
+    assert all(isinstance(a, MazeAutomaton) and a.state_bits == 6 for a in pop.automata)
+    assert all(isinstance(a, MazeAutomaton) and a.resp_bits == 3 for a in pop.automata)
 
     for i, automaton in enumerate(pop.automata):
         automaton.fitness = float(i + 1)
     pop.evolve()
 
-    assert all(a.state_bits == 6 for a in pop.automata)
-    assert all(a.resp_bits == 3 for a in pop.automata)
+    assert all(isinstance(a, MazeAutomaton) and a.state_bits == 6 for a in pop.automata)
+    assert all(isinstance(a, MazeAutomaton) and a.resp_bits == 3 for a in pop.automata)
 
 
 def test_population_round_trip_preserves_automaton_params_for_offspring(

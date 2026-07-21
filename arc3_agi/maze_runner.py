@@ -121,6 +121,14 @@ def _is_tty() -> bool:
     return hasattr(sys.stdout, "isatty") and sys.stdout.isatty()
 
 
+def _generate_run_id() -> str:
+    """Return a unique run identifier for grouping checkpoint output."""
+    import secrets as _secrets
+    from datetime import datetime as _datetime
+
+    return _datetime.now().strftime("%Y%m%dT%H%M%S") + "_" + _secrets.token_hex(3)
+
+
 def _format_table(
     handles: list[PopulationHandle],
     max_generations: int,
@@ -481,9 +489,6 @@ def run_pool(
         *run_id* is the identifier used for this run, and *run_dir* is the
         absolute path to the run's checkpoint directory.
     """
-    import secrets as _secrets
-    from datetime import datetime as _datetime
-
     params = _resolve_experiment_params(params)
     total_populations = int(params["total_populations"])
     max_parallel = int(params["max_parallel"])
@@ -503,7 +508,7 @@ def run_pool(
 
     # One shared run_id groups all checkpoint directories under a single folder.
     if run_id is None:
-        run_id = _datetime.now().strftime("%Y%m%dT%H%M%S") + "_" + _secrets.token_hex(3)
+        run_id = _generate_run_id()
 
     print(
         f"\nMaze Runner (pool) — {total_populations} total × {max_parallel} parallel "
@@ -610,22 +615,19 @@ def run_pool(
 # ---------------------------------------------------------------------------
 
 
-DEFAULT_DB_PATH: Path = Path("experiments") / "runs.duckdb"
-"""Default path for the experiment DuckDB database."""
-
-
 def run_experiment(
     name: str,
     params: dict[str, Any],
     description: str = "",
     base_dir: Path = BASE_DIR,
-    db_path: Path = DEFAULT_DB_PATH,
+    database_url: str | None = None,
 ) -> int:
     """Run a full pool experiment, persist results, and return the experiment id.
 
     Calls :func:`run_pool` and then ingests all per-population
-    ``fitness_history.json`` files into the experiment database so the run
-    can be queried and plotted in the analysis notebook.
+    ``fitness_history.json`` files into PostgreSQL so the run can be queried
+    and plotted in the analysis notebook.  The experiment name is claimed in
+    the database before any population subprocess starts.
 
     Parameters
     ----------
@@ -637,41 +639,65 @@ def run_experiment(
         Free-text description of the experiment's purpose and parameters.
     base_dir:
         Root directory for checkpoint output.  Defaults to :data:`BASE_DIR`.
-    db_path:
-        Path to the DuckDB experiment database.  Created automatically if it
-        does not exist.  Defaults to :data:`DEFAULT_DB_PATH`.
+    database_url:
+        PostgreSQL connection URL.  When omitted, :envvar:`DATABASE_URL` is
+        used, falling back to the local development default.
 
     Returns
     -------
     int
         The experiment id assigned in the database, or the existing id when
-        an experiment with the same name has already been recorded.
+        a completed experiment with the same name has already been recorded.
     """
-    with ExperimentStore(db_path) as store:
-        existing_id = store.get_experiment_id_by_name(name)
-        if existing_id is not None:
-            print(
-                f"\nExperiment '{name}' already exists → id={existing_id}; "
-                "skipping run."
-            )
-            return existing_id
-
     params = _resolve_experiment_params(params)
-    snapshots, run_id, run_dir = run_pool(base_dir=base_dir, params=params)
+    run_id = _generate_run_id()
+    experiment_id: int | None = None
 
-    with ExperimentStore(db_path) as store:
-        experiment_id = store.create_experiment(
-            name=name,
-            description=description,
+    try:
+        with ExperimentStore(database_url) as store:
+            claim = store.claim_experiment(
+                name=name,
+                description=description,
+                run_id=run_id,
+                params=params,
+            )
+            experiment_id = claim.experiment_id
+            if claim.already_completed:
+                print(
+                    f"\nExperiment '{name}' already completed → id={experiment_id}; "
+                    "skipping run."
+                )
+                return experiment_id
+            store.mark_experiment_running(experiment_id)
+
+        snapshots, run_id, run_dir = run_pool(
+            base_dir=base_dir,
             run_id=run_id,
             params=params,
         )
-        n_rows = store.ingest_run(experiment_id, run_dir)
+
+        with ExperimentStore(database_url) as store:
+            n_rows = store.ingest_run(experiment_id, run_dir)
+            store.mark_experiment_completed(experiment_id)
+
+    except BaseException as exc:
+        if experiment_id is not None:
+            try:
+                with ExperimentStore(database_url) as store:
+                    store.mark_experiment_failed(
+                        experiment_id, f"{type(exc).__name__}: {exc}"
+                    )
+            except Exception as mark_error:
+                print(
+                    f"\nFailed to mark experiment '{name}' failed: {mark_error}",
+                    file=sys.stderr,
+                )
+        raise
 
     print(
         f"\nExperiment '{name}' saved → id={experiment_id}  "
         f"({n_rows} generation-stat rows across {len(snapshots)} populations)"
-        f"\n  DB: {Path(db_path).resolve()}"
+        "\n  DB: PostgreSQL"
     )
     return experiment_id
 

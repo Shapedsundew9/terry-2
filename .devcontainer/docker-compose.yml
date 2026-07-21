@@ -12,6 +12,7 @@ services:
       - NEO4J_USERNAME=neo4j
       - NEO4J_PASSWORD=password
       - GITHUB_TOKEN=${COPILOT_GITHUB_TOKEN}
+      - DATABASE_URL=${DB_URL}
 
   db:
     image: neo4j:5.19-community # Modern stable Neo4j

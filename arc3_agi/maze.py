@@ -19,7 +19,7 @@ from arc3_agi.automaton import ActionStatus, AutomatonISBase
 from arc3_agi.checkpoint import CheckpointConfig
 from arc3_agi.environment import LayeredStaticBoolean2DGrid, StaticBoolean2DGrid
 from arc3_agi.fingerprint import FingerprintConfig
-from arc3_agi.genetic_code import GeneticCodeDict, GeneticCodeGraph
+from arc3_agi.genetic_code import GeneticCodeDict
 from arc3_agi.population import Population
 
 matplotlib.use("webagg")

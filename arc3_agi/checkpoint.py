@@ -139,15 +139,11 @@ def genetic_code_from_dict(d: dict[str, Any], arrays: dict[str, np.ndarray]) -> 
     Dispatches on ``d["type"]``.
     """
     # Import here to avoid circular imports at module level.
-    from arc3_agi.genetic_code import GeneticCodeDict, GeneticCodeGraph, GeneticCodeList, GeneticCodeSCC
+    from arc3_agi.genetic_code import GeneticCodeDict, GeneticCodeList
 
     gc_type = d.get("type")
     if gc_type == "GeneticCodeDict":
         return GeneticCodeDict.from_dict(d, arrays)
     if gc_type == "GeneticCodeList":
         return GeneticCodeList.from_dict(d, arrays)
-    if gc_type == "GeneticCodeSCC":
-        return GeneticCodeSCC.from_dict(d, arrays)
-    if gc_type == "GeneticCodeGraph":
-        return GeneticCodeGraph.from_dict(d, arrays)
     raise ValueError(f"Unknown GeneticCode type: {gc_type!r}")

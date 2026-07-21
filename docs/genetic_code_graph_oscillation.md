@@ -1,12 +1,12 @@
-# GeneticCodeGraph oscillation diagnosis
+# Genetic code oscillation diagnosis
 
 ## Symptom
 
-`MazeAutomaton` driven by `GeneticCodeGraph` characteristically runs up and down
-a single corridor: it reverses (two turns to go back on itself) but rarely turns
-a single corner to continue along a perpendicular axis. Fitness shows a short
-burst of improvement and then stalls flat. The same automaton driven by
-`GeneticCodeDict` navigates corners and reaches higher fitness.
+`MazeAutomaton` driven by the older graph-based genetic code characteristically
+runs up and down a single corridor: it reverses (two turns to go back on itself)
+but rarely turns a single corner to continue along a perpendicular axis. Fitness
+shows a short burst of improvement and then stalls flat. The same automaton
+driven by `GeneticCodeDict` navigates corners and reaches higher fitness.
 
 ## Investigation
 
@@ -22,7 +22,7 @@ Evolving champions (100 ticks/gen, 60 gens, pop 100) and replaying them:
 
 | representation | best fitness | single-turn corners | double-turn reversals |
 | --- | --- | --- | --- |
-| `GeneticCodeGraph` | ~25 | ~5 (as low as 0) | ~11 (as high as 15) |
+| graph-based variant | ~25 | ~5 (as low as 0) | ~11 (as high as 15) |
 | `GeneticCodeDict`  | higher, mean ~6 | ~7 | ~10 |
 
 The graph reverses far more than it corners; the dict is balanced. So
@@ -41,7 +41,7 @@ structurally suppressed by the `state_bits .. state_bits+resp_bits` slicing.
 
 ### 3. Root cause: `crossover` does not preserve building blocks
 
-`GeneticCodeGraph.crossover` is index-aligned (child node `p` is taken whole
+The older graph-based crossover was index-aligned (child node `p` was taken whole
 from parent A or B). But the genome is **position-dependent**: node `p`'s
 semantics depend on the values computed by *all* earlier nodes, because `in_a` /
 `in_b` are absolute value-array indices. Splicing parent A's node onto a prefix

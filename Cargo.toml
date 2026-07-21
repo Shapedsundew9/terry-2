@@ -3,6 +3,10 @@ name = "rust-2"
 version = "0.1.0"
 edition = "2021"
 
+[[bin]]
+name = "maze-runner"
+path = "src/main.rs"
+
 [dependencies]
 serde_json = "1"
 image = "0.25"
@@ -13,3 +17,10 @@ reqwest = { version = "0.12", default-features = false, features = [
     "rustls-tls",
 ] }
 rand = "0.9"
+rayon = "1"
+postgres = { version = "0.19", features = ["with-serde_json-1"] }
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4", features = ["derive"] }
+toml = "0.8"
+zip = "2"
+hostname = "0.4"

@@ -56,7 +56,9 @@ CREATE TABLE IF NOT EXISTS experiments (
     host         TEXT,
     process_id   INTEGER,
     error        TEXT,
-    params_json  JSONB       NOT NULL DEFAULT '{}'::jsonb
+    params_json  JSONB       NOT NULL DEFAULT '{}'::jsonb,
+    pop_count    INTEGER,
+    gen_count    INTEGER
 );
 
 ALTER TABLE experiments ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'completed';
@@ -67,6 +69,8 @@ ALTER TABLE experiments ADD COLUMN IF NOT EXISTS failed_at TIMESTAMPTZ;
 ALTER TABLE experiments ADD COLUMN IF NOT EXISTS host TEXT;
 ALTER TABLE experiments ADD COLUMN IF NOT EXISTS process_id INTEGER;
 ALTER TABLE experiments ADD COLUMN IF NOT EXISTS error TEXT;
+ALTER TABLE experiments ADD COLUMN IF NOT EXISTS pop_count INTEGER;
+ALTER TABLE experiments ADD COLUMN IF NOT EXISTS gen_count INTEGER;
 CREATE UNIQUE INDEX IF NOT EXISTS experiments_name_key ON experiments (name);
 
 CREATE TABLE IF NOT EXISTS generation_stats (
@@ -157,8 +161,8 @@ class ExperimentStore:
                 """
                 INSERT INTO experiments
                     (name, description, run_id, status, claimed_at, completed_at,
-                     created_at, host, process_id, params_json)
-                VALUES (%s, %s, %s, 'completed', %s, %s, %s, %s, %s, %s)
+                     created_at, host, process_id, params_json, pop_count, gen_count)
+                 VALUES (%s, %s, %s, 'completed', %s, %s, %s, %s, %s, %s, 0, 0)
                 RETURNING id
                 """,
                 [
@@ -196,8 +200,8 @@ class ExperimentStore:
                 """
                 INSERT INTO experiments
                     (name, description, run_id, status, claimed_at, created_at,
-                     host, process_id, params_json)
-                VALUES (%s, %s, %s, 'claimed', %s, %s, %s, %s, %s)
+                     host, process_id, params_json, pop_count, gen_count)
+                 VALUES (%s, %s, %s, 'claimed', %s, %s, %s, %s, %s, 0, 0)
                 ON CONFLICT (name) DO NOTHING
                 RETURNING id
                 """,
@@ -345,6 +349,9 @@ class ExperimentStore:
                         """,
                         rows,
                     )
+                self._update_experiment_summary(experiment_id)
+        else:
+            self._update_experiment_summary(experiment_id)
         return len(rows)
 
     def list_experiments(self) -> pd.DataFrame:
@@ -353,6 +360,7 @@ class ExperimentStore:
         Columns: ``id``, ``name``, ``description``, ``run_id``, ``created_at``,
         ``pop_count``, ``gen_count``, ``params_json``.
         """
+        self._refresh_missing_experiment_summaries()
         return self._read_dataframe(SQL("""
             SELECT
                 e.id,
@@ -361,12 +369,10 @@ class ExperimentStore:
                 e.run_id,
                 e.created_at,
                 e.status,
-                COUNT(DISTINCT gs.pop_id)    AS pop_count,
-                MAX(gs.generation)           AS gen_count,
+                COALESCE(e.pop_count, 0) AS pop_count,
+                e.gen_count              AS gen_count,
                 e.params_json::text          AS params_json
             FROM experiments e
-            LEFT JOIN generation_stats gs ON gs.experiment_id = e.id
-            GROUP BY e.id, e.name, e.description, e.run_id, e.created_at, e.status, e.params_json
             ORDER BY e.id
             """))
 
@@ -411,6 +417,74 @@ class ExperimentStore:
                 for column in cursor.description or []
             ]
         return pd.DataFrame(rows, columns=columns)
+
+    def _refresh_missing_experiment_summaries(self, batch_size: int = 64) -> None:
+        """Backfill cached summary columns for legacy rows in small batches."""
+        rows = self._conn.execute(
+            """
+            SELECT id
+            FROM experiments
+            WHERE pop_count IS NULL OR gen_count IS NULL
+            ORDER BY id
+            LIMIT %s
+            """,
+            [batch_size],
+        ).fetchall()
+        if not rows:
+            return
+
+        experiment_ids = [int(row[0]) for row in rows]
+
+        self._conn.execute(
+            """
+            UPDATE experiments
+            SET pop_count = 0, gen_count = 0
+            WHERE id = ANY(%s)
+              AND (pop_count IS NULL OR gen_count IS NULL)
+            """,
+            [experiment_ids],
+        )
+
+        self._conn.execute(
+            """
+            WITH agg AS (
+                SELECT
+                    experiment_id,
+                    COUNT(DISTINCT pop_id) AS pop_count,
+                    MAX(generation)        AS gen_count
+                FROM generation_stats
+                WHERE experiment_id = ANY(%s)
+                GROUP BY experiment_id
+            )
+            UPDATE experiments e
+            SET
+                pop_count = agg.pop_count,
+                gen_count = COALESCE(agg.gen_count, 0)
+            FROM agg
+            WHERE e.id = agg.experiment_id
+            """,
+            [experiment_ids],
+        )
+
+    def _update_experiment_summary(self, experiment_id: int) -> None:
+        """Recompute and store summary stats for one experiment."""
+        self._conn.execute(
+            """
+            UPDATE experiments e
+            SET
+                pop_count = COALESCE(s.pop_count, 0),
+                gen_count = COALESCE(s.gen_count, 0)
+            FROM (
+                SELECT
+                    COUNT(DISTINCT pop_id) AS pop_count,
+                    MAX(generation)        AS gen_count
+                FROM generation_stats
+                WHERE experiment_id = %s
+            ) s
+            WHERE e.id = %s
+            """,
+            [experiment_id, experiment_id],
+        )
 
     def close(self) -> None:
         """Close the underlying PostgreSQL connection."""

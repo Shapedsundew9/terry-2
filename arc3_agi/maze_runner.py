@@ -710,7 +710,7 @@ if __name__ == "__main__":
 
     params = default_experiment_params()
     run_experiment(
-        name="baseline-state4",
+        name="baseline-state4-tsetlin",
         params=params,
         description="Baseline maze evolution run.",
     )

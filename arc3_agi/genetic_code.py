@@ -352,16 +352,102 @@ class GeneticCodeTsetlin(GeneticCode):
         return isinstance(key, int) and 0 <= key < self.input_bits
 
     def crossover(self, other: GeneticCode, mutation_rate: float = 0.01) -> Self:
-        """Combine two Tsetlin codes into a child and mutate clause literals.
+        """Combine two unordered clause pools and mutate the resulting child.
 
-        Whilst the GeneticCodes must both be Tsetlin and have the same number of input and
-        response bits, they may have different numbers of clauses. The child will inherit the
-        number of clauses from the first parent (self) and may add or remove additional
-        clauses subject to mutation rate.
+        Each positive/negative mask pair is inherited atomically from a random
+        clause in either parent. Parents may have different clause counts, but
+        must agree on input and response widths. With probability
+        ``mutation_rate`` the child adds or removes one clause, and each child
+        clause independently has one literal changed to either of its other two
+        valid states: ignored, required true, or required false.
 
-        Clauses themselves are inherited from either parent at random, and each clause may
-        have its literals mutated according to the mutation rate.
+        The first parent's seeded NumPy generator owns all random choices. Its
+        threshold is preserved unless the clause count changes, in which case
+        the same voting ratio is retained.
         """
+        if not isinstance(other, GeneticCodeTsetlin):
+            raise TypeError(
+                "GeneticCodeTsetlin can only crossover with another "
+                "GeneticCodeTsetlin."
+            )
+        if self.resp_bits != other.resp_bits:
+            raise ValueError("Tsetlin parents must have the same response bits.")
+        if self.input_bits != other.input_bits:
+            raise ValueError("Tsetlin parents must have the same input bits.")
+        if not 0.0 <= mutation_rate <= 1.0:
+            raise ValueError("mutation_rate must be between 0 and 1 inclusive.")
+        if self.num_clauses < 1 or other.num_clauses < 1:
+            raise ValueError("Tsetlin parents must each contain at least one clause.")
+        if self.input_bits < 1:
+            raise ValueError("Tsetlin parents must have at least one input bit.")
+
+        rng = self._np_rng
+        child_num_clauses = self.num_clauses
+        if mutation_rate > 0.0 and rng.random() < mutation_rate:
+            if child_num_clauses == 1 or rng.random() < 0.5:
+                child_num_clauses += 1
+            else:
+                child_num_clauses -= 1
+
+        shape = (self.resp_bits, child_num_clauses)
+        response_indices = array(range(self.resp_bits), dtype=int64)[:, None]
+        self_clause_indices = rng.integers(self.num_clauses, size=shape)
+        other_clause_indices = rng.integers(other.num_clauses, size=shape)
+        inherit_other = rng.random(shape) < 0.5
+
+        child_w_pos = where(
+            inherit_other,
+            other._w_pos[response_indices, other_clause_indices],
+            self._w_pos[response_indices, self_clause_indices],
+        ).astype(uint64, copy=True)
+        child_w_neg = where(
+            inherit_other,
+            other._w_neg[response_indices, other_clause_indices],
+            self._w_neg[response_indices, self_clause_indices],
+        ).astype(uint64, copy=True)
+
+        if mutation_rate > 0.0:
+            mutation_rows, mutation_columns = (
+                rng.random(shape) < mutation_rate
+            ).nonzero()
+            mutation_bits = rng.integers(self.input_bits, size=len(mutation_rows))
+            alternative_states = rng.integers(2, size=len(mutation_rows))
+
+            for row, column, bit, alternative in zip(
+                mutation_rows,
+                mutation_columns,
+                mutation_bits,
+                alternative_states,
+            ):
+                bit_mask = uint64(1) << uint64(bit)
+                was_positive = bool(child_w_pos[row, column] & bit_mask)
+                was_negative = bool(child_w_neg[row, column] & bit_mask)
+                child_w_pos[row, column] &= ~bit_mask
+                child_w_neg[row, column] &= ~bit_mask
+
+                if not was_positive and not was_negative:
+                    if alternative == 0:
+                        child_w_pos[row, column] |= bit_mask
+                    else:
+                        child_w_neg[row, column] |= bit_mask
+                elif was_positive:
+                    if alternative == 1:
+                        child_w_neg[row, column] |= bit_mask
+                elif alternative == 1:
+                    child_w_pos[row, column] |= bit_mask
+
+        threshold = self.threshold
+        if child_num_clauses != self.num_clauses:
+            threshold = self.threshold * child_num_clauses / self.num_clauses
+
+        return self.__class__(
+            code=(child_w_pos, child_w_neg),
+            seed=int(rng.integers(0, 2**32)),
+            resp_bits=self.resp_bits,
+            num_clauses=child_num_clauses,
+            input_bits=self.input_bits,
+            threshold=threshold,
+        )
 
     def __setitem__(self, key: int, value: int) -> None:
         raise NotImplementedError(

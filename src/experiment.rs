@@ -87,6 +87,7 @@ impl ExperimentStore {
     ///
     /// Returns `(experiment_id, already_completed)`.
     /// - `already_completed = true` → run is skipped, use existing id.
+    /// - Failed experiments are reset and reclaimed in place.
     /// - Raises an error if the name is claimed/running by another process.
     pub fn claim_experiment(
         &mut self,
@@ -100,27 +101,48 @@ impl ExperimentStore {
             .unwrap_or_else(|_| "unknown".into());
         let pid = std::process::id() as i32;
 
-        // Atomic INSERT … ON CONFLICT DO NOTHING.
-        let row = self.client.query_opt(
+        let mut transaction = self.client.transaction()?;
+        let row = transaction.query_opt(
             "INSERT INTO experiments (name, description, run_id, status, host, process_id, params_json)
              VALUES ($1, $2, $3, 'claimed', $4, $5, $6)
-             ON CONFLICT (name) DO NOTHING
+             ON CONFLICT (name) DO UPDATE SET
+                description = EXCLUDED.description,
+                run_id = EXCLUDED.run_id,
+                status = 'claimed',
+                claimed_at = EXCLUDED.claimed_at,
+                started_at = NULL,
+                completed_at = NULL,
+                failed_at = NULL,
+                created_at = EXCLUDED.created_at,
+                host = EXCLUDED.host,
+                process_id = EXCLUDED.process_id,
+                error = NULL,
+                params_json = EXCLUDED.params_json,
+                pop_count = 0,
+                gen_count = 0
+             WHERE experiments.status = 'failed'
              RETURNING id",
             &[&name, &description, &run_id, &host, &pid, params_json],
         )?;
 
         if let Some(row) = row {
             let id: i64 = row.get(0);
+            transaction.execute(
+                "DELETE FROM generation_stats WHERE experiment_id = $1",
+                &[&id],
+            )?;
+            transaction.commit()?;
             return Ok((id, false));
         }
 
         // Conflict — check existing status.
-        let existing = self.client.query_one(
+        let existing = transaction.query_one(
             "SELECT id, status FROM experiments WHERE name = $1",
             &[&name],
         )?;
         let id: i64 = existing.get(0);
-        let status: &str = existing.get(1);
+        let status: String = existing.get(1);
+        transaction.commit()?;
 
         if status == "completed" {
             return Ok((id, true));
@@ -164,7 +186,8 @@ impl ExperimentStore {
              SET status = 'failed',
                  failed_at = now(),
                  error = $2
-             WHERE id = $1",
+             WHERE id = $1
+               AND status IN ('claimed', 'running')",
             &[&experiment_id, &error],
         )?;
         Ok(())
@@ -247,5 +270,75 @@ impl ExperimentStore {
         )?;
 
         Ok(total)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use serde_json::json;
+
+    use super::*;
+
+    fn test_database_url() -> Option<String> {
+        std::env::var("TEST_DATABASE_URL")
+            .or_else(|_| std::env::var("DATABASE_URL"))
+            .ok()
+    }
+
+    #[test]
+    fn failed_experiment_is_reclaimed_and_cleared() -> Result<(), Box<dyn std::error::Error>> {
+        let Some(database_url) = test_database_url() else {
+            return Ok(());
+        };
+        let suffix = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+        let name = format!("rust-failed-{}-{suffix}", std::process::id());
+        let mut store = ExperimentStore::connect(&database_url)?;
+        let (experiment_id, already_completed) =
+            store.claim_experiment(&name, "old description", "old-run", &json!({"seed": 1}))?;
+        assert!(!already_completed);
+
+        store.client.execute(
+            "INSERT INTO generation_stats
+                (experiment_id, pop_id, generation, min_fitness, max_fitness, mean_fitness, duration_s)
+             VALUES ($1, 0, 1, 0.1, 0.8, 0.4, 1.2)",
+            &[&experiment_id],
+        )?;
+        store.mark_failed(experiment_id, "interrupted")?;
+
+        let (retried_id, retried_completed) =
+            store.claim_experiment(&name, "new description", "new-run", &json!({"seed": 2}))?;
+        let row = store.client.query_one(
+            "SELECT description, run_id, status, params_json, pop_count, gen_count,
+                    (SELECT COUNT(*) FROM generation_stats WHERE experiment_id = $1)
+             FROM experiments
+             WHERE id = $1",
+            &[&experiment_id],
+        )?;
+        store.mark_completed(experiment_id)?;
+        store.mark_failed(experiment_id, "late interrupt")?;
+        let final_status: String = store
+            .client
+            .query_one(
+                "SELECT status FROM experiments WHERE id = $1",
+                &[&experiment_id],
+            )?
+            .get(0);
+        store
+            .client
+            .execute("DELETE FROM experiments WHERE id = $1", &[&experiment_id])?;
+
+        assert_eq!(retried_id, experiment_id);
+        assert!(!retried_completed);
+        assert_eq!(row.get::<_, String>(0), "new description");
+        assert_eq!(row.get::<_, String>(1), "new-run");
+        assert_eq!(row.get::<_, String>(2), "claimed");
+        assert_eq!(row.get::<_, Value>(3), json!({"seed": 2}));
+        assert_eq!(row.get::<_, i32>(4), 0);
+        assert_eq!(row.get::<_, i32>(5), 0);
+        assert_eq!(row.get::<_, i64>(6), 0);
+        assert_eq!(final_status, "completed");
+        Ok(())
     }
 }

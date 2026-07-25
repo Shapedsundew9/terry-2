@@ -37,7 +37,7 @@ def test_get_experiment_id_by_name_returns_existing_id(database_url: str) -> Non
             store.delete_experiment(existing_id)
 
 
-def test_claim_experiment_blocks_non_completed_duplicates(
+def test_claim_experiment_blocks_active_duplicates(
     database_url: str,
 ) -> None:
     name = _unique_name("claim")
@@ -52,6 +52,64 @@ def test_claim_experiment_blocks_non_completed_duplicates(
                     second_store.claim_experiment(name=name, params={"seed": 2})
         finally:
             first_store.delete_experiment(claim.experiment_id)
+
+
+def test_claim_experiment_reclaims_failed_experiment(
+    tmp_path: Path,
+    database_url: str,
+) -> None:
+    name = _unique_name("failed")
+    pop_dir = tmp_path / "old-run" / "pop_0"
+    pop_dir.mkdir(parents=True)
+    (pop_dir / "fitness_history.json").write_text(
+        json.dumps(
+            {
+                "pop_id": 0,
+                "history": [
+                    {
+                        "generation": 1,
+                        "min_fitness": 0.1,
+                        "max_fitness": 0.8,
+                        "mean_fitness": 0.4,
+                        "duration_s": 1.2,
+                    }
+                ],
+            }
+        )
+    )
+    with ExperimentStore(database_url) as store:
+        claim = store.claim_experiment(
+            name=name,
+            description="old description",
+            run_id="old-run",
+            params={"seed": 1},
+        )
+        store.ingest_run(claim.experiment_id, tmp_path / "old-run")
+        store.mark_experiment_failed(claim.experiment_id, "KeyboardInterrupt")
+        try:
+            retried = store.claim_experiment(
+                name=name,
+                description="new description",
+                run_id="new-run",
+                params={"seed": 2},
+            )
+
+            assert retried.experiment_id == claim.experiment_id
+            assert retried.status == "claimed"
+            assert retried.already_completed is False
+
+            experiment = (
+                store.list_experiments().set_index("id").loc[claim.experiment_id]
+            )
+            assert experiment["description"] == "new description"
+            assert experiment["run_id"] == "new-run"
+            assert experiment["status"] == "claimed"
+            assert json.loads(experiment["params_json"]) == {"seed": 2}
+            assert experiment["pop_count"] == 0
+            assert experiment["gen_count"] == 0
+            assert store.load_stats(claim.experiment_id).empty
+        finally:
+            store.delete_experiment(claim.experiment_id)
 
 
 def test_claim_experiment_returns_completed_existing_id(database_url: str) -> None:

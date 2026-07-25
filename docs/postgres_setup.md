@@ -75,10 +75,14 @@ run starts.
   to `running` while populations execute and `completed` after ingestion.
 - If the name already exists with `status = 'completed'`, the runner skips and
   returns the existing experiment id.
-- If the name exists with any other status, the runner raises an error instead
-  of running a duplicate experiment.
+- If the name exists with `status = 'failed'`, the existing row is reset and
+  reclaimed with the new run metadata. Any stored generation stats are removed.
+- If the name exists with `status = 'claimed'` or `status = 'running'`, the
+  runner raises an error instead of running a duplicate experiment.
 - If the runner fails after claiming a name, the row is marked `failed` and the
   original exception is re-raised.
+- The Rust runner also marks an active experiment `failed` before exiting on
+  Ctrl-C, allowing the same name to be reclaimed on the next invocation.
 
 Historical DuckDB data in `experiments/runs.duckdb` is not migrated
 automatically. Treat that as a separate one-off migration if those records need

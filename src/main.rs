@@ -255,6 +255,21 @@ fn run_experiment(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     store.mark_running(experiment_id)?;
+    let interrupt_db_url = db_url.clone();
+    ctrlc::set_handler(move || {
+        eprintln!("\nCtrl-C received; marking experiment {experiment_id} as failed.");
+        match ExperimentStore::connect(&interrupt_db_url) {
+            Ok(mut interrupt_store) => {
+                if let Err(error) =
+                    interrupt_store.mark_failed(experiment_id, "interrupted by Ctrl-C")
+                {
+                    eprintln!("Failed to update experiment {experiment_id}: {error}");
+                }
+            }
+            Err(error) => eprintln!("Failed to connect to the experiment database: {error}"),
+        }
+        std::process::exit(130);
+    })?;
     // Drop the store to release the connection while the pool runs.
     drop(store);
 

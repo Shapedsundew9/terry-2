@@ -190,9 +190,10 @@ class ExperimentStore:
 
         A newly inserted row is returned with ``status == "claimed"``.  If the
         name already belongs to a completed experiment, the existing id is
-        returned with ``already_completed`` set.  Any non-completed existing row
-        raises :class:`ExperimentClaimError` so concurrent runners do not both
-        execute the same experiment name.
+        returned with ``already_completed`` set.  A failed experiment is reset
+        and reclaimed in place.  Existing claimed or running rows raise
+        :class:`ExperimentClaimError` so concurrent runners do not both execute
+        the same experiment name.
         """
         claimed_at = datetime.now(tz=timezone.utc)
         with self._conn.transaction():
@@ -202,7 +203,22 @@ class ExperimentStore:
                     (name, description, run_id, status, claimed_at, created_at,
                      host, process_id, params_json, pop_count, gen_count)
                  VALUES (%s, %s, %s, 'claimed', %s, %s, %s, %s, %s, 0, 0)
-                ON CONFLICT (name) DO NOTHING
+                ON CONFLICT (name) DO UPDATE SET
+                    description = EXCLUDED.description,
+                    run_id = EXCLUDED.run_id,
+                    status = 'claimed',
+                    claimed_at = EXCLUDED.claimed_at,
+                    started_at = NULL,
+                    completed_at = NULL,
+                    failed_at = NULL,
+                    created_at = EXCLUDED.created_at,
+                    host = EXCLUDED.host,
+                    process_id = EXCLUDED.process_id,
+                    error = NULL,
+                    params_json = EXCLUDED.params_json,
+                    pop_count = 0,
+                    gen_count = 0
+                WHERE experiments.status = 'failed'
                 RETURNING id
                 """,
                 [
@@ -217,7 +233,12 @@ class ExperimentStore:
                 ],
             ).fetchone()
             if row is not None:
-                return ExperimentClaim(experiment_id=int(row[0]), status="claimed")
+                experiment_id = int(row[0])
+                self._conn.execute(
+                    "DELETE FROM generation_stats WHERE experiment_id = %s",
+                    [experiment_id],
+                )
+                return ExperimentClaim(experiment_id=experiment_id, status="claimed")
 
             existing = self._conn.execute(
                 """

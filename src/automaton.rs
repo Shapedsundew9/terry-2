@@ -5,7 +5,8 @@ use rand::rngs::StdRng;
 /// hierarchy in a single flat struct for performance.
 use rand::{RngCore, SeedableRng};
 
-use crate::genetic_code::GeneticCode;
+use crate::fingerprint::SelectionFingerprint;
+use crate::genetic_code::{GeneticCode, GeneticCodeConfig};
 use crate::maze::{Maze, ORIENTATION_MOVES};
 
 /// A single maze-navigating automaton.
@@ -16,6 +17,7 @@ use crate::maze::{Maze, ORIENTATION_MOVES};
 /// - `new_internal_state = output_code & state_mask`
 /// - `action = output_code >> state_bits`
 pub struct MazeAutomaton {
+    pub id: u64,
     // --- Position & orientation ---
     pub x: usize,
     pub y: usize,
@@ -46,42 +48,82 @@ pub struct MazeAutomaton {
     pub last_action: i32,
 
     // --- Genetic code ---
-    pub genetic_code: Box<dyn GeneticCode>,
+    pub genetic_code: GeneticCode,
+    pub fingerprint: Option<SelectionFingerprint>,
 
     // --- Automaton RNG (for reset random placement) ---
     rng: StdRng,
-    /// Seed stored for checkpoint round-trips.
-    pub seed: Option<u64>,
 }
 
 impl MazeAutomaton {
-    /// Create a new automaton with an empty `GeneticCodeDict`.
-    pub fn new(maze: &Maze, state_bits: u8, seed: u64) -> Self {
-        use crate::genetic_code::GeneticCodeDict;
+    /// Create a new automaton with the configured genetic-code representation.
+    pub fn new(
+        maze: &Maze,
+        state_bits: u8,
+        code_config: &GeneticCodeConfig,
+        seed: u64,
+    ) -> Result<Self, String> {
         let mut rng = StdRng::seed_from_u64(seed);
-        let code_seed = rng.next_u64();
+        let code_seed = rng.next_u32() as u64;
         let output_bits = state_bits + 2; // state_bits + resp_bits
-        let genetic_code = Box::new(GeneticCodeDict::new(output_bits, code_seed));
-        Self::from_parts(genetic_code, maze, state_bits, &mut rng, Some(seed))
+        let input_bits = state_bits + 9; // state_bits + env_bits
+        let genetic_code = GeneticCode::new(code_config, output_bits, input_bits, code_seed)?;
+        Ok(Self::from_parts(genetic_code, maze, state_bits, &mut rng))
     }
 
     /// Create a new automaton with a supplied genetic code (for offspring).
-    pub fn with_code(
-        genetic_code: Box<dyn GeneticCode>,
+    pub fn with_code(genetic_code: GeneticCode, maze: &Maze, state_bits: u8, seed: u64) -> Self {
+        let mut rng = StdRng::seed_from_u64(seed);
+        Self::from_parts(genetic_code, maze, state_bits, &mut rng)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn restore(
+        genetic_code: GeneticCode,
         maze: &Maze,
         state_bits: u8,
         seed: u64,
-    ) -> Self {
-        let mut rng = StdRng::seed_from_u64(seed);
-        Self::from_parts(genetic_code, maze, state_bits, &mut rng, Some(seed))
+        x: usize,
+        y: usize,
+        orientation: u8,
+        internal_state: u8,
+        energy: i32,
+        energy_grid: Vec<u8>,
+        fitness: f64,
+        last_action: i32,
+        fingerprint: Option<SelectionFingerprint>,
+    ) -> Result<Self, String> {
+        if x >= maze.width || y >= maze.height {
+            return Err("checkpoint automaton coordinates are outside the maze".into());
+        }
+        if orientation > 3 {
+            return Err("checkpoint automaton orientation must be between 0 and 3".into());
+        }
+        if energy_grid.len() != maze.width * maze.height {
+            return Err("checkpoint energy grid does not match the maze dimensions".into());
+        }
+        if genetic_code.resp_bits() != state_bits + 2 {
+            return Err("checkpoint genetic-code output width does not match automaton".into());
+        }
+
+        let mut automaton = Self::with_code(genetic_code, maze, state_bits, seed);
+        automaton.x = x;
+        automaton.y = y;
+        automaton.orientation = orientation;
+        automaton.internal_state = internal_state;
+        automaton.energy = energy;
+        automaton.energy_grid = energy_grid;
+        automaton.fitness = fitness;
+        automaton.last_action = last_action;
+        automaton.fingerprint = fingerprint;
+        Ok(automaton)
     }
 
     fn from_parts(
-        genetic_code: Box<dyn GeneticCode>,
+        genetic_code: GeneticCode,
         maze: &Maze,
         state_bits: u8,
         rng: &mut StdRng,
-        seed: Option<u64>,
     ) -> Self {
         let env_bits: u8 = 9;
         let resp_bits: u8 = 2;
@@ -96,6 +138,7 @@ impl MazeAutomaton {
         let automaton_rng = StdRng::seed_from_u64(rng.next_u64());
 
         MazeAutomaton {
+            id: 0,
             x,
             y,
             orientation,
@@ -112,8 +155,8 @@ impl MazeAutomaton {
             fitness: 0.0,
             last_action: -1,
             genetic_code,
+            fingerprint: None,
             rng: automaton_rng,
-            seed,
         }
     }
 

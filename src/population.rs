@@ -5,10 +5,12 @@
 /// and mutation to produce the next generation.
 use std::time::Instant;
 
-use rand::{RngCore, SeedableRng};
 use rand::rngs::StdRng;
+use rand::{RngCore, SeedableRng};
 
 use crate::automaton::MazeAutomaton;
+use crate::fingerprint::{FingerprintConfig, SelectionFingerprint};
+use crate::genetic_code::GeneticCodeConfig;
 use crate::maze::Maze;
 
 /// Per-generation fitness statistics.  Written to `fitness_history.json`.
@@ -33,7 +35,8 @@ pub struct PopConfig {
     pub restarts_per_gen: usize,
     pub checkpoint_interval: usize,
     pub mutation_rate: f64,
-    pub code_type: String, // "GeneticCodeDict" | "GeneticCodeList"
+    pub genetic_code: GeneticCodeConfig,
+    pub fingerprint: Option<FingerprintConfig>,
 }
 
 impl Default for PopConfig {
@@ -45,7 +48,8 @@ impl Default for PopConfig {
             restarts_per_gen: 20,
             checkpoint_interval: 0,
             mutation_rate: 0.01,
-            code_type: "GeneticCodeDict".into(),
+            genetic_code: GeneticCodeConfig::default(),
+            fingerprint: None,
         }
     }
 }
@@ -59,15 +63,73 @@ pub struct Population {
     rng: StdRng,
     pub config: PopConfig,
     gen_start: Instant,
+    next_individual_id: u64,
+    previous_pairings: Vec<Pairing>,
+}
+
+#[derive(Clone, Debug)]
+struct Pairing {
+    parent1_id: u64,
+    parent2_id: u64,
+    child_id: u64,
+    parent1_fitness: f64,
+    parent2_fitness: f64,
+    parent1_fingerprint: Option<SelectionFingerprint>,
+    parent2_fingerprint: Option<SelectionFingerprint>,
 }
 
 impl Population {
+    pub fn restore(
+        mut automata: Vec<MazeAutomaton>,
+        generation: usize,
+        tick_count: u64,
+        fitness_history: Vec<GenerationStats>,
+        config: PopConfig,
+        seed: u64,
+    ) -> Self {
+        for (id, automaton) in automata.iter_mut().enumerate() {
+            automaton.id = id as u64;
+        }
+        let next_individual_id = automata.len() as u64;
+        Self {
+            automata,
+            generation,
+            tick_count,
+            fitness_history,
+            rng: StdRng::seed_from_u64(seed),
+            config,
+            gen_start: Instant::now(),
+            next_individual_id,
+            previous_pairings: Vec::new(),
+        }
+    }
+
     /// Create a new population seeded from `seed`.
     pub fn new(maze: &Maze, config: PopConfig, seed: u64) -> Self {
         let mut rng = StdRng::seed_from_u64(seed);
+        if let Some(fingerprint) = &config.fingerprint {
+            fingerprint
+                .validate()
+                .expect("invalid fingerprint configuration");
+        }
         let automata: Vec<MazeAutomaton> = (0..config.size)
-            .map(|_| MazeAutomaton::new(maze, config.state_bits, rng.next_u64()))
-            .collect();
+            .map(|id| {
+                let mut automaton = MazeAutomaton::new(
+                    maze,
+                    config.state_bits,
+                    &config.genetic_code,
+                    rng.next_u64(),
+                )?;
+                automaton.id = id as u64;
+                automaton.fingerprint = config
+                    .fingerprint
+                    .as_ref()
+                    .map(|cfg| SelectionFingerprint::random(cfg.bits, &mut rng));
+                Ok::<MazeAutomaton, String>(automaton)
+            })
+            .collect::<Result<_, _>>()
+            .expect("invalid genetic-code configuration");
+        let next_individual_id = automata.len() as u64;
 
         Population {
             automata,
@@ -77,6 +139,8 @@ impl Population {
             rng,
             config,
             gen_start: Instant::now(),
+            next_individual_id,
+            previous_pairings: Vec::new(),
         }
     }
 
@@ -122,10 +186,13 @@ impl Population {
     /// for progress reporting.
     pub fn evolve(&mut self, maze: &Maze) -> GenerationStats {
         // Sort descending by fitness.
-        self.automata.sort_by(|a, b| b.fitness.partial_cmp(&a.fitness).unwrap());
+        self.automata
+            .sort_by(|a, b| b.fitness.partial_cmp(&a.fitness).unwrap());
 
         let n = self.automata.len();
         let half = n / 2;
+
+        self.update_fingerprints(half);
 
         // Capture fitness vector before replacement (for history).
         let fitnesses: Vec<f64> = self.automata.iter().map(|a| a.fitness).collect();
@@ -145,25 +212,50 @@ impl Population {
 
         let pool_len = pool_indices.len();
         let mutation_rate = self.config.mutation_rate;
+        let tournament_k = self
+            .config
+            .fingerprint
+            .as_ref()
+            .map_or(1, |config| config.tournament_k);
 
         // Create offspring.
         let mut offspring: Vec<MazeAutomaton> = Vec::with_capacity(half);
+        let mut new_pairings = Vec::with_capacity(half);
         for _ in 0..half {
             let p1_idx = pool_indices[(self.rng.next_u64() as usize) % pool_len];
-            let p2_idx = pool_indices[(self.rng.next_u64() as usize) % pool_len];
-            // Clone p2's genetic code so we can borrow p1 and self.rng
-            // independently (different struct fields — Rust allows this).
-            let p2_code = self.automata[p2_idx].genetic_code.clone_box();
+            let p2_idx = self.select_mate(&pool_indices, p1_idx, tournament_k);
             let child_code = self.automata[p1_idx]
                 .genetic_code
-                .crossover(p2_code.as_ref(), mutation_rate, &mut self.rng);
+                .crossover(
+                    &self.automata[p2_idx].genetic_code,
+                    mutation_rate,
+                    &mut self.rng,
+                )
+                .expect("incompatible genetic-code parents");
             let child_seed = self.rng.next_u64();
-            offspring.push(MazeAutomaton::with_code(
-                child_code,
-                maze,
-                self.config.state_bits,
-                child_seed,
-            ));
+            let mut child =
+                MazeAutomaton::with_code(child_code, maze, self.config.state_bits, child_seed);
+            child.id = self.next_individual_id;
+            self.next_individual_id += 1;
+            if let (Some(first), Some(second), Some(config)) = (
+                self.automata[p1_idx].fingerprint.as_ref(),
+                self.automata[p2_idx].fingerprint.as_ref(),
+                self.config.fingerprint.as_ref(),
+            ) {
+                let mut fingerprint = first.crossover(second, &mut self.rng);
+                fingerprint.mutate(config.mutation_rate, &mut self.rng);
+                child.fingerprint = Some(fingerprint);
+            }
+            new_pairings.push(Pairing {
+                parent1_id: self.automata[p1_idx].id,
+                parent2_id: self.automata[p2_idx].id,
+                child_id: child.id,
+                parent1_fitness: self.automata[p1_idx].fitness,
+                parent2_fitness: self.automata[p2_idx].fitness,
+                parent1_fingerprint: self.automata[p1_idx].fingerprint.clone(),
+                parent2_fingerprint: self.automata[p2_idx].fingerprint.clone(),
+            });
+            offspring.push(child);
         }
 
         // Record statistics.
@@ -189,10 +281,142 @@ impl Population {
         for (i, child) in offspring.into_iter().enumerate() {
             self.automata[half + i] = child;
         }
+        self.previous_pairings = new_pairings;
         for a in &mut self.automata {
             a.reset(maze);
         }
 
         stats
+    }
+
+    fn select_mate(&mut self, pool: &[usize], selector: usize, k: usize) -> usize {
+        if k <= 1 || pool.len() <= 1 || self.automata[selector].fingerprint.is_none() {
+            return pool[(self.rng.next_u64() as usize) % pool.len()];
+        }
+        let selector_fingerprint = self.automata[selector].fingerprint.as_ref().unwrap();
+        let mut best = pool[(self.rng.next_u64() as usize) % pool.len()];
+        let mut best_distance = self.automata[best]
+            .fingerprint
+            .as_ref()
+            .map_or(u32::MAX, |candidate| {
+                selector_fingerprint.hamming(candidate)
+            });
+        for _ in 1..k {
+            let candidate = pool[(self.rng.next_u64() as usize) % pool.len()];
+            let distance = self.automata[candidate]
+                .fingerprint
+                .as_ref()
+                .map_or(u32::MAX, |fingerprint| {
+                    selector_fingerprint.hamming(fingerprint)
+                });
+            if distance < best_distance {
+                best = candidate;
+                best_distance = distance;
+            }
+        }
+        best
+    }
+
+    fn update_fingerprints(&mut self, half: usize) {
+        if self.config.fingerprint.is_none() || self.previous_pairings.is_empty() || half == 0 {
+            return;
+        }
+        let survivor_cutoff = self.automata[half - 1].fitness;
+        let survivor_ids: std::collections::HashSet<u64> = self.automata[..half]
+            .iter()
+            .filter(|automaton| automaton.fitness > 0.0)
+            .map(|automaton| automaton.id)
+            .collect();
+        let fitness_by_id: std::collections::HashMap<u64, f64> = self
+            .automata
+            .iter()
+            .map(|automaton| (automaton.id, automaton.fitness))
+            .collect();
+        let fingerprint_by_id: std::collections::HashMap<u64, SelectionFingerprint> = self
+            .automata
+            .iter()
+            .filter_map(|automaton| {
+                automaton
+                    .fingerprint
+                    .clone()
+                    .map(|fingerprint| (automaton.id, fingerprint))
+            })
+            .collect();
+        let mut seen = std::collections::HashSet::new();
+
+        for pairing in &self.previous_pairings {
+            let (learner_id, teacher_id) = if pairing.parent1_fitness <= pairing.parent2_fitness {
+                (pairing.parent1_id, pairing.parent2_id)
+            } else {
+                (pairing.parent2_id, pairing.parent1_id)
+            };
+            if !survivor_ids.contains(&learner_id) || !seen.insert((learner_id, teacher_id)) {
+                continue;
+            }
+            let saved_teacher = if teacher_id == pairing.parent1_id {
+                pairing.parent1_fingerprint.as_ref()
+            } else {
+                pairing.parent2_fingerprint.as_ref()
+            };
+            let Some(teacher) = fingerprint_by_id.get(&teacher_id).or(saved_teacher) else {
+                continue;
+            };
+            let child_fitness = fitness_by_id.get(&pairing.child_id).copied();
+            let child_survived = survivor_ids.contains(&pairing.child_id);
+            let Some(learner) = self
+                .automata
+                .iter_mut()
+                .find(|automaton| automaton.id == learner_id)
+                .and_then(|automaton| automaton.fingerprint.as_mut())
+            else {
+                continue;
+            };
+            if child_fitness.is_some_and(|fitness| fitness > survivor_cutoff) {
+                learner.flip_toward(teacher, &mut self.rng);
+            } else if !child_survived {
+                learner.flip_away(teacher, &mut self.rng);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::genetic_code::GeneticCodeKind;
+
+    #[test]
+    fn fresh_populations_use_the_selected_genetic_code() {
+        let maze = Maze::new("model-routing", 4, 3);
+        for kind in [
+            GeneticCodeKind::Tsetlin,
+            GeneticCodeKind::Dict,
+            GeneticCodeKind::List,
+        ] {
+            let config = PopConfig {
+                size: 4,
+                state_bits: 4,
+                ticks_per_restart: 2,
+                restarts_per_gen: 1,
+                checkpoint_interval: 0,
+                mutation_rate: 0.01,
+                genetic_code: GeneticCodeConfig {
+                    kind,
+                    ..GeneticCodeConfig::default()
+                },
+                fingerprint: None,
+            };
+            let mut population = Population::new(&maze, config, 10);
+            assert!(population
+                .automata
+                .iter()
+                .all(|automaton| automaton.genetic_code.kind() == kind));
+            population.run_generation(&maze);
+            population.evolve(&maze);
+            assert!(population
+                .automata
+                .iter()
+                .all(|automaton| automaton.genetic_code.kind() == kind));
+        }
     }
 }

@@ -24,3 +24,12 @@ clap = { version = "4", features = ["derive"] }
 toml = "0.8"
 zip = "2"
 hostname = "0.4"
+ndarray = "0.16"
+ndarray-npy = "0.9"
+
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "tsetlin"
+harness = false

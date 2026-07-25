@@ -149,10 +149,10 @@ def test_genetic_code_tsetlin_from_dict_legacy_defaults() -> None:
     }
 
     restored = GeneticCodeTsetlin.from_dict(legacy_meta, arrays)
-    assert restored.resp_bits == 1
-    assert restored.num_clauses == 10
+    assert restored.resp_bits == 2
+    assert restored.num_clauses == 5
     assert restored.input_bits == 64
-    assert restored.threshold == (10 // 2) + 1
+    assert restored.threshold == (5 // 2) + 1
     assert restored._w_pos.shape == original._w_pos.shape
     assert restored._w_neg.shape == original._w_neg.shape
 

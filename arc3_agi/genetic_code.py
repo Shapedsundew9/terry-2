@@ -492,8 +492,8 @@ class GeneticCodeTsetlin(GeneticCode):
         return cls(
             code=(w_pos, w_neg),
             seed=d.get("seed"),
-            resp_bits=d.get("resp_bits", 1),
-            num_clauses=d.get("num_clauses", 10),
+            resp_bits=d.get("resp_bits", w_pos.shape[0]),
+            num_clauses=d.get("num_clauses", w_pos.shape[1]),
             input_bits=d.get("input_bits", 64),
             threshold=d.get("threshold"),
         )

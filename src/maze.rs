@@ -23,6 +23,8 @@ pub const ORIENTATION_MOVES: [(i32, i32); 4] = [
     (-1, 0), // LEFT
 ];
 
+pub type MazeLayout = (Vec<bool>, (usize, usize), Vec<(usize, usize)>);
+
 /// Scan order offsets for each of the 4 orientations (radius = 1, 3×3 window).
 ///
 /// Returns `[(dy, dx); 9]` in the order that produces bits MSB→LSB for the
@@ -82,10 +84,7 @@ fn orientation_offsets(ori: u8) -> [(i32, i32); 9] {
 /// - `wall`: row-major flat `bool` array (`width * height`); `true` = wall.
 /// - `goal_pos`: `(gx, gy)` of the single goal cell.
 /// - `free`: list of `(x, y)` non-wall cells.
-pub fn generate_maze(
-    side_length_bits: u8,
-    seed: u64,
-) -> (Vec<bool>, (usize, usize), Vec<(usize, usize)>) {
+pub fn generate_maze(side_length_bits: u8, seed: u64) -> MazeLayout {
     assert!(side_length_bits >= 4, "side_length_bits must be >= 4");
     let side = 1usize << side_length_bits;
     let mut rng = StdRng::seed_from_u64(seed);

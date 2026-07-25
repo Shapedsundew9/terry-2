@@ -461,6 +461,4 @@ fig.update_layout(
 
 fig.show()
 
-best_of_best_df
-
 # %%

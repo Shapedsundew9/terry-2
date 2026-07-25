@@ -9,25 +9,25 @@
 ///   - `automaton_{i}_values`     — int64 array
 ///   - `automaton_{i}_energy_grid`— uint8 array
 ///   - `fitness_history_fitnesses`— float64 2-D array
-use std::io::{self, Write};
+use std::fs::File;
+use std::io::{self, BufReader, Write};
 use std::path::Path;
 
+use ndarray::{Array1, Array2};
+use ndarray_npy::NpzReader;
 use toml::{Table, Value};
 
+use crate::automaton::MazeAutomaton;
+use crate::fingerprint::{FingerprintConfig, SelectionFingerprint};
+use crate::genetic_code::{GeneticCode, GeneticCodeConfig, GeneticCodeKind, GeneticCodeTsetlin};
 use crate::maze::Maze;
-use crate::population::Population;
+use crate::population::{GenerationStats, PopConfig, Population};
 
 /// Checkpoint configuration.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct CheckpointConfig {
     pub enabled: bool,
     pub generation_interval: usize,
-}
-
-impl Default for CheckpointConfig {
-    fn default() -> Self {
-        CheckpointConfig { enabled: false, generation_interval: 0 }
-    }
 }
 
 impl CheckpointConfig {
@@ -55,13 +55,440 @@ pub fn save_population(population: &Population, maze: &Maze, stem: &Path) -> io:
     let npz_path = stem.with_extension("npz");
 
     let toml_doc = build_toml(population, maze);
-    let toml_str = toml::to_string(&toml_doc)
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+    let toml_str = toml::to_string(&toml_doc).map_err(|e| io::Error::other(e.to_string()))?;
     std::fs::write(&toml_path, toml_str.as_bytes())?;
 
     let npz_bytes = build_npz(population)?;
     std::fs::write(&npz_path, &npz_bytes)?;
 
+    Ok(())
+}
+
+#[derive(Clone, Debug)]
+pub struct ResumeConfig {
+    pub ticks_per_restart: usize,
+    pub restarts_per_gen: usize,
+    pub checkpoint_interval: usize,
+    pub mutation_rate: f64,
+    pub seed: u64,
+}
+
+#[derive(Clone, Debug)]
+pub struct CheckpointSummary {
+    pub generation: usize,
+    pub population_size: usize,
+    pub state_bits: u8,
+    pub code_type: String,
+    pub environment_name: String,
+    pub fingerprint_enabled: bool,
+}
+
+pub fn inspect_checkpoint(stem: &Path) -> Result<CheckpointSummary, Box<dyn std::error::Error>> {
+    let stem = stem.with_extension("");
+    let document: Value = toml::from_str(&std::fs::read_to_string(stem.with_extension("toml"))?)?;
+    let root = value_table(&document, "checkpoint root")?;
+    let meta = child_table(root, "meta")?;
+    let environment = child_table(root, "environment")?;
+    let automata = root
+        .get("automata")
+        .and_then(Value::as_array)
+        .ok_or_else(|| invalid_data("checkpoint is missing automata"))?;
+    let first = automata
+        .first()
+        .ok_or_else(|| invalid_data("checkpoint population is empty"))?;
+    let first = value_table(first, "automaton")?;
+    let genetic_code = child_table(first, "genetic_code")?;
+    Ok(CheckpointSummary {
+        generation: usize_value(meta, "generation")?,
+        population_size: automata.len(),
+        state_bits: u8_value(first, "state_bits")?,
+        code_type: string_value(genetic_code, "type")?.to_string(),
+        environment_name: string_value(environment, "name")?.to_string(),
+        fingerprint_enabled: root.contains_key("fingerprint_config"),
+    })
+}
+
+/// Load a schema-v1 Python or Rust population checkpoint.
+///
+/// The supplied maze is the external environment contract used by Python's
+/// loader too. Runtime scheduling and continuation RNG state come from
+/// `resume`; model structure and fingerprints come from the checkpoint.
+pub fn load_population(
+    stem: &Path,
+    maze: &Maze,
+    resume: &ResumeConfig,
+) -> Result<Population, Box<dyn std::error::Error>> {
+    if !resume.mutation_rate.is_finite() || !(0.0..=1.0).contains(&resume.mutation_rate) {
+        return Err(invalid_data("mutation_rate must be between 0 and 1").into());
+    }
+    let stem = stem.with_extension("");
+    let document: Value = toml::from_str(&std::fs::read_to_string(stem.with_extension("toml"))?)?;
+    let root = value_table(&document, "checkpoint root")?;
+    let meta = child_table(root, "meta")?;
+    if string_value(meta, "class")? != "Population" {
+        return Err(invalid_data("checkpoint class must be Population").into());
+    }
+    let schema_version = integer_value(meta, "schema_version")?;
+    if schema_version != 1 {
+        return Err(invalid_data(format!(
+            "unsupported checkpoint schema version {schema_version}"
+        ))
+        .into());
+    }
+    let environment = child_table(root, "environment")?;
+    if string_value(environment, "class")? != "Maze"
+        || string_value(environment, "name")? != maze.name
+    {
+        return Err(invalid_data(format!(
+            "environment mismatch: checkpoint has {}/{:?}, supplied Maze/{:?}",
+            string_value(environment, "class")?,
+            string_value(environment, "name")?,
+            maze.name
+        ))
+        .into());
+    }
+
+    let generation = usize_value(meta, "generation")?;
+    let tick_count = u64_value(meta, "tick_count")?;
+    let fingerprint_config = root
+        .get("fingerprint_config")
+        .map(
+            |value| -> Result<FingerprintConfig, Box<dyn std::error::Error>> {
+                let table = value_table(value, "fingerprint_config")?;
+                let config = FingerprintConfig {
+                    bits: u8_value_default(table, "bits", 32)?,
+                    tournament_k: usize_value_default(table, "tournament_k", 1)?,
+                    mutation_rate: float_value_default(table, "mutation_rate", 0.01)?,
+                };
+                config.validate().map_err(invalid_data)?;
+                Ok(config)
+            },
+        )
+        .transpose()?;
+
+    let file = File::open(stem.with_extension("npz"))?;
+    let mut npz = NpzReader::new(BufReader::new(file))?;
+    let history_fitnesses: Option<Array2<f64>> = npz.by_name("fitness_history_fitnesses.npy").ok();
+    let history_meta = root
+        .get("fitness_history")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if let Some(fitnesses) = &history_fitnesses {
+        if fitnesses.nrows() != history_meta.len() {
+            return Err(invalid_data("fitness history row count does not match TOML").into());
+        }
+    }
+    let mut fitness_history = Vec::with_capacity(history_meta.len());
+    for (index, value) in history_meta.iter().enumerate() {
+        let table = value_table(value, "fitness_history entry")?;
+        fitness_history.push(GenerationStats {
+            generation: usize_value(table, "generation")?,
+            min_fitness: float_value(table, "min_fitness")?,
+            max_fitness: float_value(table, "max_fitness")?,
+            mean_fitness: float_value(table, "mean_fitness")?,
+            duration_s: float_value_default(table, "duration_s", 0.0)?,
+            fitnesses: history_fitnesses
+                .as_ref()
+                .map(|values| values.row(index).to_vec())
+                .unwrap_or_default(),
+        });
+    }
+
+    let automata_meta = root
+        .get("automata")
+        .and_then(Value::as_array)
+        .ok_or_else(|| invalid_data("checkpoint is missing automata"))?;
+    if automata_meta.is_empty() {
+        return Err(invalid_data("checkpoint population is empty").into());
+    }
+    if let Some(fitnesses) = &history_fitnesses {
+        if fitnesses.ncols() != automata_meta.len() {
+            return Err(invalid_data("fitness history width does not match population").into());
+        }
+    }
+
+    let mut automata = Vec::with_capacity(automata_meta.len());
+    let mut state_bits = None;
+    let mut code_kind = None;
+    let mut initial_clauses = 10usize;
+    let mut initial_threshold = None;
+    for (index, value) in automata_meta.iter().enumerate() {
+        let table = value_table(value, "automaton")?;
+        let current_state_bits = u8_value(table, "state_bits")?;
+        if state_bits
+            .replace(current_state_bits)
+            .is_some_and(|bits| bits != current_state_bits)
+        {
+            return Err(invalid_data("checkpoint automata have mixed state widths").into());
+        }
+        if u8_value_default(table, "env_bits", 9)? != 9
+            || u8_value_default(table, "resp_bits", 2)? != 2
+        {
+            return Err(
+                invalid_data("Rust MazeAutomaton requires env_bits=9 and resp_bits=2").into(),
+            );
+        }
+        let genetic_meta = child_table(table, "genetic_code")?;
+        let metadata_output_bits = genetic_meta
+            .get("resp_bits")
+            .map(|_| u8_value(genetic_meta, "resp_bits"))
+            .transpose()?;
+        let seed = optional_seed(genetic_meta);
+        let prefix = format!("automaton_{index}_");
+        let genetic_code = match string_value(genetic_meta, "type")? {
+            "GeneticCodeDict" => {
+                set_common_kind(&mut code_kind, GeneticCodeKind::Dict)?;
+                let output_bits = metadata_output_bits.unwrap_or(1);
+                let keys: Array1<i64> = npz.by_name(&format!("{prefix}keys.npy"))?;
+                let values: Array1<i64> = npz.by_name(&format!("{prefix}values.npy"))?;
+                if keys.len() != values.len() {
+                    return Err(invalid_data("Dict checkpoint key/value lengths differ").into());
+                }
+                let entries = keys
+                    .iter()
+                    .zip(values.iter())
+                    .map(|(&key, &value)| {
+                        let key = u32::try_from(key)
+                            .map_err(|_| invalid_data("Dict checkpoint key is outside u32"))?;
+                        let value = u8::try_from(value)
+                            .map_err(|_| invalid_data("Dict checkpoint value is outside u8"))?;
+                        Ok((key, value))
+                    })
+                    .collect::<Result<Vec<_>, io::Error>>()?;
+                GeneticCode::from_dict_entries(entries, output_bits, seed)
+            }
+            "GeneticCodeList" => {
+                set_common_kind(&mut code_kind, GeneticCodeKind::List)?;
+                let output_bits = metadata_output_bits.unwrap_or(1);
+                let values: Array1<i64> = npz.by_name(&format!("{prefix}values.npy"))?;
+                let values = values
+                    .iter()
+                    .map(|&value| {
+                        u8::try_from(value)
+                            .map_err(|_| invalid_data("List checkpoint value is outside u8"))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                GeneticCode::from_list_values(values, output_bits, seed)
+            }
+            "GeneticCodeTsetlin" => {
+                set_common_kind(&mut code_kind, GeneticCodeKind::Tsetlin)?;
+                let positive: Array2<u64> = npz.by_name(&format!("{prefix}w_pos.npy"))?;
+                let negative: Array2<u64> = npz.by_name(&format!("{prefix}w_neg.npy"))?;
+                if positive.raw_dim() != negative.raw_dim() {
+                    return Err(
+                        invalid_data("Tsetlin positive/negative matrix shapes differ").into(),
+                    );
+                }
+                let output_bits = metadata_output_bits.unwrap_or(u8::try_from(positive.nrows())?);
+                if positive.nrows() != output_bits as usize {
+                    return Err(invalid_data("Tsetlin matrix rows do not match resp_bits").into());
+                }
+                let clauses = positive.ncols();
+                let metadata_clauses = usize_value_default(genetic_meta, "num_clauses", clauses)?;
+                if genetic_meta.contains_key("num_clauses") && metadata_clauses != clauses {
+                    return Err(
+                        invalid_data("Tsetlin matrix columns do not match num_clauses").into(),
+                    );
+                }
+                let input_bits = u8_value_default(genetic_meta, "input_bits", 64)?;
+                let threshold = optional_number(genetic_meta, "threshold")?
+                    .unwrap_or((metadata_clauses / 2 + 1) as f64);
+                if index == 0 {
+                    initial_clauses = clauses;
+                    initial_threshold = Some(threshold);
+                }
+                GeneticCode::Tsetlin(GeneticCodeTsetlin::from_masks(
+                    positive.iter().copied().collect(),
+                    negative.iter().copied().collect(),
+                    output_bits,
+                    clauses,
+                    input_bits,
+                    threshold,
+                    seed,
+                )?)
+            }
+            other => {
+                return Err(invalid_data(format!("unknown genetic-code type {other:?}")).into())
+            }
+        };
+
+        let coords = table
+            .get("coords")
+            .and_then(Value::as_array)
+            .ok_or_else(|| invalid_data("automaton coords must be an array"))?;
+        if coords.len() != 3 {
+            return Err(invalid_data("MazeAutomaton coords must contain x, y, orientation").into());
+        }
+        let coord = |position: usize| -> Result<usize, io::Error> {
+            coords[position]
+                .as_integer()
+                .and_then(|value| usize::try_from(value).ok())
+                .ok_or_else(|| invalid_data("automaton coordinate is invalid"))
+        };
+        let energy_grid: Array1<u8> = npz.by_name(&format!("{prefix}energy_grid.npy"))?;
+        let fingerprint = match (
+            table.get("fingerprint_bits").and_then(Value::as_integer),
+            table.get("fingerprint_value").and_then(Value::as_integer),
+        ) {
+            (Some(bits), Some(value)) => Some(SelectionFingerprint::with_value(
+                u8::try_from(bits).map_err(|_| invalid_data("fingerprint bits are invalid"))?,
+                u64::try_from(value).map_err(|_| invalid_data("fingerprint value is invalid"))?,
+            )),
+            (None, None) => None,
+            _ => return Err(invalid_data("fingerprint bits/value must appear together").into()),
+        };
+        let mut automaton = MazeAutomaton::restore(
+            genetic_code,
+            maze,
+            current_state_bits,
+            resume.seed.wrapping_add(index as u64 + 1),
+            coord(0)?,
+            coord(1)?,
+            u8::try_from(coord(2)?).map_err(|_| invalid_data("orientation is invalid"))?,
+            u8_value_default(table, "internal_state", 0)?,
+            i32_value(table, "energy")?,
+            energy_grid.to_vec(),
+            float_value(table, "fitness")?,
+            i32_value_default(table, "last_action", -1)?,
+            fingerprint,
+        )?;
+        automaton.id = index as u64;
+        automata.push(automaton);
+    }
+
+    let state_bits = state_bits.expect("non-empty automata checked above");
+    let kind = code_kind.expect("non-empty automata checked above");
+    let config = PopConfig {
+        size: automata.len(),
+        state_bits,
+        ticks_per_restart: resume.ticks_per_restart,
+        restarts_per_gen: resume.restarts_per_gen,
+        checkpoint_interval: resume.checkpoint_interval,
+        mutation_rate: resume.mutation_rate,
+        genetic_code: GeneticCodeConfig {
+            kind,
+            tsetlin_clauses: initial_clauses,
+            tsetlin_threshold: initial_threshold,
+        },
+        fingerprint: fingerprint_config,
+    };
+    Ok(Population::restore(
+        automata,
+        generation,
+        tick_count,
+        fitness_history,
+        config,
+        resume.seed,
+    ))
+}
+
+fn invalid_data(message: impl Into<String>) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, message.into())
+}
+
+fn value_table<'a>(value: &'a Value, context: &str) -> Result<&'a Table, io::Error> {
+    value
+        .as_table()
+        .ok_or_else(|| invalid_data(format!("{context} must be a TOML table")))
+}
+
+fn child_table<'a>(table: &'a Table, key: &str) -> Result<&'a Table, io::Error> {
+    table
+        .get(key)
+        .ok_or_else(|| invalid_data(format!("checkpoint is missing {key}")))
+        .and_then(|value| value_table(value, key))
+}
+
+fn string_value<'a>(table: &'a Table, key: &str) -> Result<&'a str, io::Error> {
+    table
+        .get(key)
+        .and_then(Value::as_str)
+        .ok_or_else(|| invalid_data(format!("{key} must be a string")))
+}
+
+fn integer_value(table: &Table, key: &str) -> Result<i64, io::Error> {
+    table
+        .get(key)
+        .and_then(Value::as_integer)
+        .ok_or_else(|| invalid_data(format!("{key} must be an integer")))
+}
+
+fn usize_value(table: &Table, key: &str) -> Result<usize, io::Error> {
+    usize::try_from(integer_value(table, key)?)
+        .map_err(|_| invalid_data(format!("{key} must be a nonnegative usize")))
+}
+
+fn usize_value_default(table: &Table, key: &str, default: usize) -> Result<usize, io::Error> {
+    match table.get(key) {
+        Some(_) => usize_value(table, key),
+        None => Ok(default),
+    }
+}
+
+fn u64_value(table: &Table, key: &str) -> Result<u64, io::Error> {
+    u64::try_from(integer_value(table, key)?)
+        .map_err(|_| invalid_data(format!("{key} must be a nonnegative u64")))
+}
+
+fn u8_value(table: &Table, key: &str) -> Result<u8, io::Error> {
+    u8::try_from(integer_value(table, key)?)
+        .map_err(|_| invalid_data(format!("{key} must fit in u8")))
+}
+
+fn u8_value_default(table: &Table, key: &str, default: u8) -> Result<u8, io::Error> {
+    match table.get(key) {
+        Some(_) => u8_value(table, key),
+        None => Ok(default),
+    }
+}
+
+fn i32_value(table: &Table, key: &str) -> Result<i32, io::Error> {
+    i32::try_from(integer_value(table, key)?)
+        .map_err(|_| invalid_data(format!("{key} must fit in i32")))
+}
+
+fn i32_value_default(table: &Table, key: &str, default: i32) -> Result<i32, io::Error> {
+    match table.get(key) {
+        Some(_) => i32_value(table, key),
+        None => Ok(default),
+    }
+}
+
+fn optional_number(table: &Table, key: &str) -> Result<Option<f64>, io::Error> {
+    match table.get(key) {
+        None => Ok(None),
+        Some(Value::Float(value)) => Ok(Some(*value)),
+        Some(Value::Integer(value)) => Ok(Some(*value as f64)),
+        Some(_) => Err(invalid_data(format!("{key} must be numeric"))),
+    }
+}
+
+fn float_value(table: &Table, key: &str) -> Result<f64, io::Error> {
+    optional_number(table, key)?.ok_or_else(|| invalid_data(format!("{key} is required")))
+}
+
+fn float_value_default(table: &Table, key: &str, default: f64) -> Result<f64, io::Error> {
+    Ok(optional_number(table, key)?.unwrap_or(default))
+}
+
+fn optional_seed(table: &Table) -> Option<u64> {
+    table
+        .get("seed")
+        .and_then(Value::as_integer)
+        .map(|seed| seed as u64)
+}
+
+fn set_common_kind(
+    common: &mut Option<GeneticCodeKind>,
+    current: GeneticCodeKind,
+) -> Result<(), io::Error> {
+    if common.is_some_and(|kind| kind != current) {
+        return Err(invalid_data(
+            "checkpoint automata use mixed genetic-code representations",
+        ));
+    }
+    *common = Some(current);
     Ok(())
 }
 
@@ -78,7 +505,10 @@ fn build_toml(pop: &Population, maze: &Maze) -> Table {
     meta.insert("schema_version".into(), Value::Integer(1));
     meta.insert("generation".into(), Value::Integer(pop.generation as i64));
     meta.insert("tick_count".into(), Value::Integer(pop.tick_count as i64));
-    meta.insert("automaton_class".into(), Value::String("MazeAutomaton".into()));
+    meta.insert(
+        "automaton_class".into(),
+        Value::String("MazeAutomaton".into()),
+    );
 
     // [environment]
     let mut env = Table::new();
@@ -118,13 +548,24 @@ fn build_toml(pop: &Population, maze: &Maze) -> Table {
         .iter()
         .map(|a| {
             // genetic_code subtable
-            let gc = a.genetic_code.as_ref();
+            let gc = &a.genetic_code;
             let mut gc_table = Table::new();
             gc_table.insert("type".into(), Value::String(gc.code_type().into()));
             gc_table.insert("schema_version".into(), Value::Integer(1));
             gc_table.insert("resp_bits".into(), Value::Integer(gc.resp_bits() as i64));
             if let Some(seed) = gc.code_seed() {
                 gc_table.insert("seed".into(), Value::Integer(seed as i64));
+            }
+            if let Some(tsetlin) = gc.as_tsetlin() {
+                gc_table.insert(
+                    "num_clauses".into(),
+                    Value::Integer(tsetlin.num_clauses() as i64),
+                );
+                gc_table.insert(
+                    "input_bits".into(),
+                    Value::Integer(tsetlin.input_bits() as i64),
+                );
+                gc_table.insert("threshold".into(), Value::Float(tsetlin.threshold()));
             }
 
             let mut at = Table::new();
@@ -147,6 +588,16 @@ fn build_toml(pop: &Population, maze: &Maze) -> Table {
                 Value::Integer(a.internal_state as i64),
             );
             at.insert("energy".into(), Value::Integer(a.energy as i64));
+            if let Some(fingerprint) = &a.fingerprint {
+                at.insert(
+                    "fingerprint_bits".into(),
+                    Value::Integer(fingerprint.bits() as i64),
+                );
+                at.insert(
+                    "fingerprint_value".into(),
+                    Value::Integer(fingerprint.value() as i64),
+                );
+            }
             at.insert("genetic_code".into(), Value::Table(gc_table));
             Value::Table(at)
         })
@@ -157,11 +608,24 @@ fn build_toml(pop: &Population, maze: &Maze) -> Table {
     root.insert("meta".into(), Value::Table(meta));
     root.insert("environment".into(), Value::Table(env));
     root.insert("config".into(), Value::Table(config_table));
+    if let Some(fingerprint) = &cfg.fingerprint {
+        let mut fingerprint_config = Table::new();
+        fingerprint_config.insert("bits".into(), Value::Integer(fingerprint.bits as i64));
+        fingerprint_config.insert(
+            "tournament_k".into(),
+            Value::Integer(fingerprint.tournament_k as i64),
+        );
+        fingerprint_config.insert(
+            "mutation_rate".into(),
+            Value::Float(fingerprint.mutation_rate),
+        );
+        root.insert(
+            "fingerprint_config".into(),
+            Value::Table(fingerprint_config),
+        );
+    }
     root.insert("automaton_params".into(), Value::Table(automaton_params));
-    root.insert(
-        "fitness_history".into(),
-        Value::Array(fitness_history),
-    );
+    root.insert("fitness_history".into(), Value::Array(fitness_history));
     root.insert("automata".into(), Value::Array(automata));
     root
 }
@@ -178,26 +642,48 @@ fn build_npz(pop: &Population) -> io::Result<Vec<u8>> {
     let cursor = std::io::Cursor::new(buf);
     let mut zip = ZipWriter::new(cursor);
 
-    let options: FileOptions<()> = FileOptions::default()
-        .compression_method(CompressionMethod::Deflated);
+    let options: FileOptions<()> =
+        FileOptions::default().compression_method(CompressionMethod::Deflated);
 
     // Per-automaton arrays.
     for (i, a) in pop.automata.iter().enumerate() {
-        let entries = a.genetic_code.entries();
-        let mut keys_i64: Vec<i64> = Vec::with_capacity(entries.len());
-        let mut values_i64: Vec<i64> = Vec::with_capacity(entries.len());
-        for (k, v) in &entries {
-            keys_i64.push(*k as i64);
-            values_i64.push(*v as i64);
+        match &a.genetic_code {
+            GeneticCode::Dict(_) => {
+                let entries = a.genetic_code.entries();
+                let keys: Vec<i64> = entries.iter().map(|(key, _)| *key as i64).collect();
+                let values: Vec<i64> = entries.iter().map(|(_, value)| *value as i64).collect();
+                zip.start_file(format!("automaton_{i}_keys.npy"), options)?;
+                write_npy_i64(&mut zip, &keys)?;
+                zip.start_file(format!("automaton_{i}_values.npy"), options)?;
+                write_npy_i64(&mut zip, &values)?;
+            }
+            GeneticCode::List(_) => {
+                let values: Vec<i64> = a
+                    .genetic_code
+                    .entries()
+                    .into_iter()
+                    .map(|(_, value)| value as i64)
+                    .collect();
+                zip.start_file(format!("automaton_{i}_values.npy"), options)?;
+                write_npy_i64(&mut zip, &values)?;
+            }
+            GeneticCode::Tsetlin(code) => {
+                zip.start_file(format!("automaton_{i}_w_pos.npy"), options)?;
+                write_npy_u64_2d(
+                    &mut zip,
+                    code.positive_masks(),
+                    code.output_bits() as usize,
+                    code.num_clauses(),
+                )?;
+                zip.start_file(format!("automaton_{i}_w_neg.npy"), options)?;
+                write_npy_u64_2d(
+                    &mut zip,
+                    code.negative_masks(),
+                    code.output_bits() as usize,
+                    code.num_clauses(),
+                )?;
+            }
         }
-
-        // automaton_{i}_keys
-        zip.start_file(format!("automaton_{i}_keys.npy"), options)?;
-        write_npy_i64(&mut zip, &keys_i64)?;
-
-        // automaton_{i}_values
-        zip.start_file(format!("automaton_{i}_values.npy"), options)?;
-        write_npy_i64(&mut zip, &values_i64)?;
 
         // automaton_{i}_energy_grid
         zip.start_file(format!("automaton_{i}_energy_grid.npy"), options)?;
@@ -235,15 +721,13 @@ fn build_npz(pop: &Population) -> io::Result<Vec<u8>> {
 // Total preamble (10 + hdrlen) must be a multiple of 64.
 
 fn write_npy_header(w: &mut impl Write, descr: &str, shape_str: &str) -> io::Result<()> {
-    let dict = format!(
-        "{{'descr': '{descr}', 'fortran_order': False, 'shape': {shape_str}, }}"
-    );
+    let dict = format!("{{'descr': '{descr}', 'fortran_order': False, 'shape': {shape_str}, }}");
     // preamble = 10 bytes (magic + version + hdrlen field)
     let preamble = 10usize;
     let dict_bytes = dict.len();
     // We need preamble + hdrlen to be a multiple of 64, and hdrlen = dict_bytes + padding + 1 (\n)
     let min_hdrlen = dict_bytes + 1; // at least dict + newline
-    let hdrlen = ((preamble + min_hdrlen + 63) / 64) * 64 - preamble;
+    let hdrlen = (preamble + min_hdrlen).div_ceil(64) * 64 - preamble;
     let padding = hdrlen - dict_bytes - 1;
 
     w.write_all(b"\x93NUMPY")?;
@@ -273,16 +757,316 @@ fn write_npy_u8(w: &mut impl Write, data: &[u8]) -> io::Result<()> {
     Ok(())
 }
 
-fn write_npy_f64_2d(
-    w: &mut impl Write,
-    data: &[f64],
-    rows: usize,
-    cols: usize,
-) -> io::Result<()> {
+fn write_npy_u64_2d(w: &mut impl Write, data: &[u64], rows: usize, cols: usize) -> io::Result<()> {
+    let shape_str = format!("({rows}, {cols})");
+    write_npy_header(w, "<u8", &shape_str)?;
+    for &value in data {
+        w.write_all(&value.to_le_bytes())?;
+    }
+    Ok(())
+}
+
+fn write_npy_f64_2d(w: &mut impl Write, data: &[f64], rows: usize, cols: usize) -> io::Result<()> {
     let shape_str = format!("({rows}, {cols})");
     write_npy_header(w, "<f8", &shape_str)?;
     for &v in data {
         w.write_all(&v.to_le_bytes())?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fingerprint::FingerprintConfig;
+    use crate::genetic_code::GeneticCodeConfig;
+    use crate::population::PopConfig;
+    use std::process::Command;
+
+    #[test]
+    fn python_loads_rust_tsetlin_population_checkpoint() {
+        let maze = Maze::new("compat-maze", 4, 7);
+        let config = PopConfig {
+            size: 2,
+            state_bits: 4,
+            ticks_per_restart: 1,
+            restarts_per_gen: 1,
+            checkpoint_interval: 0,
+            mutation_rate: 0.01,
+            genetic_code: GeneticCodeConfig::default(),
+            fingerprint: Some(FingerprintConfig {
+                bits: 4,
+                tournament_k: 2,
+                mutation_rate: 0.01,
+            }),
+        };
+        let population = Population::new(&maze, config, 123);
+        let directory =
+            std::env::temp_dir().join(format!("terry-rust-checkpoint-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let stem = directory.join("population");
+        save_population(&population, &maze, &stem).unwrap();
+
+        let python = if Path::new(".venv/bin/python").exists() {
+            ".venv/bin/python"
+        } else {
+            "python3"
+        };
+        let script = format!(
+            r#"
+from pathlib import Path
+from arc3_agi.genetic_code import GeneticCodeTsetlin
+from arc3_agi.maze import Maze, MazeAutomaton
+from arc3_agi.population import Population
+
+population = Population.load(
+    Path({stem:?}),
+    environment=Maze("compat-maze", side_length_bits=4, seed=7),
+    AutomatonClass=MazeAutomaton,
+)
+assert len(population.automata) == 2
+assert population._fingerprint_config.bits == 4
+for automaton in population.automata:
+    assert isinstance(automaton.genetic_code, GeneticCodeTsetlin)
+    assert automaton.genetic_code._w_pos.shape == (6, 10)
+    assert automaton.genetic_code._w_neg.shape == (6, 10)
+    assert automaton.genetic_code.threshold == 6.0
+    assert automaton.fingerprint is not None
+"#,
+            stem = stem.display().to_string()
+        );
+        let output = Command::new(python)
+            .arg("-c")
+            .arg(script)
+            .output()
+            .expect("run Python checkpoint compatibility check");
+        std::fs::remove_dir_all(&directory).ok();
+        assert!(
+            output.status.success(),
+            "Python failed to load Rust checkpoint:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn python_loads_rust_dict_and_list_population_checkpoints() {
+        let maze = Maze::new("compat-legacy", 4, 9);
+        let directory = std::env::temp_dir().join(format!(
+            "terry-rust-legacy-checkpoints-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+
+        for (name, kind) in [
+            ("dict", GeneticCodeKind::Dict),
+            ("list", GeneticCodeKind::List),
+        ] {
+            let config = PopConfig {
+                size: 2,
+                state_bits: 4,
+                ticks_per_restart: 1,
+                restarts_per_gen: 1,
+                checkpoint_interval: 0,
+                mutation_rate: 0.01,
+                genetic_code: GeneticCodeConfig {
+                    kind,
+                    ..GeneticCodeConfig::default()
+                },
+                fingerprint: None,
+            };
+            let mut population = Population::new(&maze, config, 42);
+            population.run_generation(&maze);
+            let stem = directory.join(name);
+            save_population(&population, &maze, &stem).unwrap();
+        }
+
+        let python = if Path::new(".venv/bin/python").exists() {
+            ".venv/bin/python"
+        } else {
+            "python3"
+        };
+        let script = format!(
+            r#"
+from pathlib import Path
+from arc3_agi.genetic_code import GeneticCodeDict, GeneticCodeList
+from arc3_agi.maze import Maze, MazeAutomaton
+from arc3_agi.population import Population
+
+maze = Maze("compat-legacy", side_length_bits=4, seed=9)
+for name, expected in (("dict", GeneticCodeDict), ("list", GeneticCodeList)):
+    population = Population.load(
+        Path({directory:?}) / name,
+        environment=maze,
+        AutomatonClass=MazeAutomaton,
+    )
+    assert all(isinstance(a.genetic_code, expected) for a in population.automata)
+"#,
+            directory = directory.display().to_string()
+        );
+        let output = Command::new(python)
+            .arg("-c")
+            .arg(script)
+            .output()
+            .expect("run Python legacy checkpoint compatibility check");
+        std::fs::remove_dir_all(&directory).ok();
+        assert!(
+            output.status.success(),
+            "Python failed to load Rust Dict/List checkpoints:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn rust_round_trips_tsetlin_population_checkpoint() {
+        let maze = Maze::new("round-trip-maze", 4, 11);
+        let config = PopConfig {
+            size: 3,
+            state_bits: 4,
+            ticks_per_restart: 2,
+            restarts_per_gen: 1,
+            checkpoint_interval: 0,
+            mutation_rate: 0.02,
+            genetic_code: GeneticCodeConfig::default(),
+            fingerprint: Some(FingerprintConfig {
+                bits: 4,
+                tournament_k: 2,
+                mutation_rate: 0.03,
+            }),
+        };
+        let population = Population::new(&maze, config, 77);
+        let directory =
+            std::env::temp_dir().join(format!("terry-rust-round-trip-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let stem = directory.join("population");
+        save_population(&population, &maze, &stem).unwrap();
+
+        let restored = load_population(
+            &stem,
+            &maze,
+            &ResumeConfig {
+                ticks_per_restart: 2,
+                restarts_per_gen: 1,
+                checkpoint_interval: 0,
+                mutation_rate: 0.02,
+                seed: 77,
+            },
+        )
+        .unwrap();
+        std::fs::remove_dir_all(&directory).ok();
+
+        assert_eq!(restored.generation, 0);
+        assert_eq!(restored.automata.len(), 3);
+        assert!(restored.config.fingerprint.is_some());
+        for (original, loaded) in population.automata.iter().zip(&restored.automata) {
+            let original = original.genetic_code.as_tsetlin().unwrap();
+            let loaded = loaded.genetic_code.as_tsetlin().unwrap();
+            assert_eq!(original.positive_masks(), loaded.positive_masks());
+            assert_eq!(original.negative_masks(), loaded.negative_masks());
+            assert_eq!(original.threshold(), loaded.threshold());
+            assert_eq!(original.num_clauses(), loaded.num_clauses());
+        }
+    }
+
+    #[test]
+    fn rust_infers_legacy_tsetlin_dimensions_from_arrays() {
+        let maze = Maze::new("legacy-tsetlin", 4, 13);
+        let config = PopConfig {
+            size: 2,
+            state_bits: 4,
+            ticks_per_restart: 1,
+            restarts_per_gen: 1,
+            checkpoint_interval: 0,
+            mutation_rate: 0.01,
+            genetic_code: GeneticCodeConfig {
+                tsetlin_clauses: 5,
+                ..GeneticCodeConfig::default()
+            },
+            fingerprint: None,
+        };
+        let population = Population::new(&maze, config, 88);
+        let directory =
+            std::env::temp_dir().join(format!("terry-rust-legacy-tsetlin-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let stem = directory.join("population");
+        save_population(&population, &maze, &stem).unwrap();
+
+        let toml_path = stem.with_extension("toml");
+        let mut document: Value = toml::from_str(&std::fs::read_to_string(&toml_path).unwrap())
+            .expect("parse generated checkpoint");
+        for automaton in document
+            .as_table_mut()
+            .unwrap()
+            .get_mut("automata")
+            .unwrap()
+            .as_array_mut()
+            .unwrap()
+        {
+            let genetic_code = automaton
+                .as_table_mut()
+                .unwrap()
+                .get_mut("genetic_code")
+                .unwrap()
+                .as_table_mut()
+                .unwrap();
+            genetic_code.remove("resp_bits");
+            genetic_code.remove("num_clauses");
+            genetic_code.remove("input_bits");
+            genetic_code.remove("threshold");
+        }
+        std::fs::write(&toml_path, toml::to_string(&document).unwrap()).unwrap();
+
+        let restored = load_population(
+            &stem,
+            &maze,
+            &ResumeConfig {
+                ticks_per_restart: 1,
+                restarts_per_gen: 1,
+                checkpoint_interval: 0,
+                mutation_rate: 0.01,
+                seed: 88,
+            },
+        )
+        .unwrap();
+        std::fs::remove_dir_all(&directory).ok();
+
+        let code = restored.automata[0].genetic_code.as_tsetlin().unwrap();
+        assert_eq!(code.output_bits(), 6);
+        assert_eq!(code.num_clauses(), 5);
+        assert_eq!(code.input_bits(), 64);
+        assert_eq!(code.threshold(), 3.0);
+    }
+
+    #[test]
+    fn rust_loads_existing_python_tsetlin_checkpoint() {
+        let stem = Path::new("runs/2026-07-25T20-01-25-932326/gen_000800");
+        if !stem.with_extension("toml").exists() {
+            return;
+        }
+        let maze = Maze::new("ExampleMaze", 6, 42);
+        let population = load_population(
+            stem,
+            &maze,
+            &ResumeConfig {
+                ticks_per_restart: 1,
+                restarts_per_gen: 1,
+                checkpoint_interval: 0,
+                mutation_rate: 0.01,
+                seed: 1234,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(population.generation, 800);
+        assert_eq!(population.automata.len(), 100);
+        assert_eq!(population.fitness_history.len(), 800);
+        assert_eq!(population.config.fingerprint.as_ref().unwrap().bits, 4);
+        assert!(population
+            .automata
+            .iter()
+            .all(|automaton| automaton.genetic_code.as_tsetlin().is_some()));
+        assert!(population
+            .automata
+            .iter()
+            .all(|automaton| automaton.fingerprint.is_some()));
+    }
 }

@@ -13,7 +13,7 @@ import pytest
 from arc3_agi.automaton import AutomatonBase, AutomatonISBase
 from arc3_agi.checkpoint import CheckpointConfig, genetic_code_from_dict
 from arc3_agi.environment import Int1DArray
-from arc3_agi.genetic_code import GeneticCodeDict, GeneticCodeList
+from arc3_agi.genetic_code import GeneticCodeDict, GeneticCodeList, GeneticCodeTsetlin
 from arc3_agi.maze import Maze, MazeAutomaton
 from arc3_agi.population import Population
 
@@ -115,6 +115,46 @@ def test_genetic_code_list_save_load(tmp_path: Path) -> None:
     code.save(tmp_path / "gcl")
     restored = GeneticCodeList.load(tmp_path / "gcl")
     assert list(restored._code) == [10, 20, 30]
+
+
+# ---------------------------------------------------------------------------
+# GeneticCodeTsetlin — round-trip and legacy metadata compatibility
+# ---------------------------------------------------------------------------
+
+
+def test_genetic_code_tsetlin_round_trip(tmp_path: Path) -> None:
+    code = GeneticCodeTsetlin(seed=123, resp_bits=3, num_clauses=7, input_bits=16)
+    code.save(tmp_path / "gct")
+
+    restored = GeneticCodeTsetlin.load(tmp_path / "gct")
+    assert restored.resp_bits == 3
+    assert restored.num_clauses == 7
+    assert restored.input_bits == 16
+    assert restored.threshold == (7 // 2) + 1
+    assert np.array_equal(restored._w_pos, code._w_pos)
+    assert np.array_equal(restored._w_neg, code._w_neg)
+
+
+def test_genetic_code_tsetlin_from_dict_legacy_defaults() -> None:
+    original = GeneticCodeTsetlin(seed=999, resp_bits=2, num_clauses=5, input_bits=8)
+
+    # Simulate older metadata that did not include newer optional fields.
+    legacy_meta = {
+        "type": "GeneticCodeTsetlin",
+        "schema_version": 1,
+    }
+    arrays = {
+        "w_pos": original._w_pos.copy(),
+        "w_neg": original._w_neg.copy(),
+    }
+
+    restored = GeneticCodeTsetlin.from_dict(legacy_meta, arrays)
+    assert restored.resp_bits == 1
+    assert restored.num_clauses == 10
+    assert restored.input_bits == 64
+    assert restored.threshold == (10 // 2) + 1
+    assert restored._w_pos.shape == original._w_pos.shape
+    assert restored._w_neg.shape == original._w_neg.shape
 
 
 # ---------------------------------------------------------------------------

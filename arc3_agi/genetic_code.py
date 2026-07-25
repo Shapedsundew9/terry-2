@@ -3,12 +3,18 @@ from __future__ import annotations
 from abc import abstractmethod
 from collections.abc import Mapping, MutableMapping
 from math import log
-from random import Random, randint, randrange
+from random import Random
 from typing import Any, Callable, Iterator, Self, Sequence
 
-import numpy as np
+from numpy import array, asarray, dot, int64, random, sum, uint64, where, zeros
+from numpy.typing import NDArray
 
 from arc3_agi.checkpoint import SCHEMA_VERSION, Checkpointable
+
+# Constants for Tsetlin Machine implementation
+# Precompute powers of 2 for packing boolean results into an integer
+_POWERS = asarray([1 << i for i in range(64)], dtype=uint64)
+UINT64_ZERO = uint64(0)
 
 
 class GeneticCode(MutableMapping[int, int], Checkpointable):
@@ -26,7 +32,7 @@ class GeneticCode(MutableMapping[int, int], Checkpointable):
     @abstractmethod
     def __init__(
         self,
-        code: Mapping[int, int] | Sequence[int] | None,
+        code: Any = None,
         seed: int | None = None,
         resp_bits: int = 1,
         missing_key_value_fn: Callable[[], int] | None = None,
@@ -67,6 +73,21 @@ class GeneticCode(MutableMapping[int, int], Checkpointable):
             child, seed=self._rng.randint(0, 2**32 - 1), resp_bits=self.resp_bits
         )
 
+    @abstractmethod
+    def to_dict(self) -> dict[str, Any]:
+        """Return TOML-serialisable metadata for this genetic code."""
+
+    @abstractmethod
+    def to_arrays(self) -> dict[str, NDArray[Any]]:
+        """Return array payload for NPZ checkpoint storage."""
+
+    @classmethod
+    @abstractmethod
+    def from_dict(
+        cls, d: dict[str, Any], arrays: dict[str, NDArray[Any]], **kwargs: Any
+    ) -> GeneticCode:
+        """Reconstruct a genetic code instance from checkpoint metadata + arrays."""
+
 
 class GeneticCodeDict(GeneticCode):
     """A simple implementation of the GeneticCode interface using a dictionary as the underlying
@@ -75,16 +96,12 @@ class GeneticCodeDict(GeneticCode):
 
     def __init__(
         self,
-        code: Mapping[int, int] | Sequence[int],
+        code: Mapping[int, int] | None = None,
         seed: int | None = None,
         resp_bits: int = 1,
     ) -> None:
-        super().__init__(code, seed, resp_bits)
-        if isinstance(code, Mapping):
-            # Copy if the code is a mapping to avoid mutating the original
-            self._code: dict[int, int] = dict(code)
-        else:
-            self._code = {i: r for i, r in enumerate(code)}
+        super().__init__(code=code, seed=seed, resp_bits=resp_bits)
+        self._code: dict[int, int] = dict(code) if code is not None else {}
 
     def __getitem__(self, key: int) -> int:
         if key not in self._code:
@@ -159,14 +176,14 @@ class GeneticCodeDict(GeneticCode):
             d["seed"] = self._seed
         return d
 
-    def to_arrays(self) -> dict[str, np.ndarray]:
-        keys = np.array(list(self._code.keys()), dtype=np.int64)
-        values = np.array(list(self._code.values()), dtype=np.int64)
+    def to_arrays(self) -> dict[str, NDArray[int64]]:
+        keys = array(list(self._code.keys()), dtype=int64)
+        values = array(list(self._code.values()), dtype=int64)
         return {"keys": keys, "values": values}
 
     @classmethod
     def from_dict(
-        cls, d: dict[str, Any], arrays: dict[str, np.ndarray], **kwargs: Any
+        cls, d: dict[str, Any], arrays: dict[str, NDArray[int64]], **kwargs: Any
     ) -> GeneticCodeDict:
         keys: list[int] = arrays["keys"].tolist()
         values: list[int] = arrays["values"].tolist()
@@ -185,15 +202,12 @@ class GeneticCodeList(GeneticCode):
 
     def __init__(
         self,
-        code: Mapping[int, int] | Sequence[int],
+        code: Sequence[int] | None = None,
         seed: int | None = None,
         resp_bits: int = 1,
     ) -> None:
-        super().__init__(code, seed, resp_bits)
-        if isinstance(code, Mapping):
-            self._code = list(code.values())
-        else:
-            self._code = list(code)
+        super().__init__(code=code, seed=seed, resp_bits=resp_bits)
+        self._code = list(code) if code is not None else []
 
     def __getitem__(self, key: int) -> int:
         return self._code[key]
@@ -228,12 +242,172 @@ class GeneticCodeList(GeneticCode):
             d["seed"] = self._seed
         return d
 
-    def to_arrays(self) -> dict[str, np.ndarray]:
-        return {"values": np.array(self._code, dtype=np.int64)}
+    def to_arrays(self) -> dict[str, NDArray[int64]]:
+        return {"values": array(self._code, dtype=int64)}
 
     @classmethod
     def from_dict(
-        cls, d: dict[str, Any], arrays: dict[str, np.ndarray], **kwargs: Any
+        cls, d: dict[str, Any], arrays: dict[str, NDArray[int64]], **kwargs: Any
     ) -> GeneticCodeList:
         values: list[int] = arrays["values"].tolist()
         return cls(values, seed=d.get("seed"), resp_bits=d.get("resp_bits", 1))
+
+
+class GeneticCodeTsetlin(GeneticCode):
+    """A Tsetlin Machine genetic code mapping input bitmasks to response bit vectors
+
+    using multi-clause majority voting.
+    """
+
+    def __init__(
+        self,
+        # Weight matrices for positive and negative literals
+        code: (
+            tuple[NDArray[uint64], NDArray[uint64]] | None
+        ) = None,  # [resp_bits, num_clauses]
+        seed: int | None = None,
+        resp_bits: int = 1,
+        num_clauses: int = 10,
+        input_bits: int = 64,
+        threshold: int | float | None = None,
+        missing_key_value_fn: Callable[[], int] | None = None,
+    ) -> None:
+        super().__init__(
+            code,
+            seed=seed,
+            resp_bits=resp_bits,
+            missing_key_value_fn=missing_key_value_fn,
+        )
+        self._np_rng = random.default_rng(self._seed)
+        self.num_clauses = num_clauses
+        self.input_bits = input_bits
+
+        # Majority threshold: default is strict majority (> 50% of clauses voting TRUE)
+        self.threshold = threshold if threshold is not None else (num_clauses // 2) + 1
+
+        # ------------------------------------------------------------------
+        # Weight Matrix Initialization: Shape = (resp_bits, num_clauses)
+        # ------------------------------------------------------------------
+        if code is not None:
+            self._w_pos = code[0]
+            self._w_neg = code[1]
+            self.num_clauses = self._w_pos.shape[1]
+            assert (
+                self._w_pos.shape == self._w_neg.shape
+            ), "Weight matrices must have the same shape."
+            assert (
+                self._w_pos.shape[0] == resp_bits
+            ), "Weight matrices must match the number of response bits."
+        else:
+            # Initialize sparse random masks if no weights are provided
+            # Create empty weight matrices
+            self._w_pos = zeros((self.resp_bits, self.num_clauses), dtype=uint64)
+            self._w_neg = zeros((self.resp_bits, self.num_clauses), dtype=uint64)
+
+            # Set initial activation probability per bit (e.g., 5% chance a literal is active)
+            active_prob = 0.05
+
+            for bit in range(input_bits):
+                # Randomly pick state for this bit position across all clauses:
+                # 0 = Ignore (00), 1 = Require True (10), 2 = Require False (01)
+                # Probability weights: [1 - active_prob, active_prob / 2, active_prob / 2]
+                choices = self._np_rng.choice(
+                    a=[0, 1, 2],
+                    size=(self.resp_bits, self.num_clauses),
+                    p=[1.0 - active_prob, active_prob / 2.0, active_prob / 2.0],
+                )
+
+                bit_val = uint64(1 << bit)
+                self._w_pos |= where(choices == 1, bit_val, UINT64_ZERO)
+                self._w_neg |= where(choices == 2, bit_val, UINT64_ZERO)
+
+    def __getitem__(self, key: int) -> int:
+        """Evaluates input key L against all clauses across all response bits using
+
+        vectorized NumPy majority voting. Returns packed integer output.
+        """
+        l_val = uint64(key)
+
+        # 1. Broad-cast clause evaluations across all response bits and clauses
+        # Result shapes: (resp_bits, num_clauses) boolean arrays
+        match_pos = (self._w_pos & l_val) == self._w_pos
+        match_neg = (self._w_neg & l_val) == 0
+
+        # Combine positive and negative literal requirements for every clause
+        clauses_satisfied = match_pos & match_neg
+
+        # 2. Count active clauses per response bit along axis 1
+        # Result shape: (resp_bits,) integer array containing votes per bit
+        votes = sum(clauses_satisfied, axis=1)
+
+        # 3. Apply majority thresholding
+        # Result shape: (resp_bits,) boolean array
+        bit_results = votes >= self.threshold
+
+        # 4. Pack boolean results directly into a single output integer
+        # dot(bit_results, _powers) computes sum(bit[i] * 2^i) in C
+        return int(dot(bit_results, _POWERS[: self.resp_bits]))
+
+    def __contains__(self, key: object) -> bool:
+        return isinstance(key, int) and 0 <= key < self.input_bits
+
+    def crossover(self, other: GeneticCode, mutation_rate: float = 0.01) -> Self:
+        """Combine two Tsetlin codes into a child and mutate clause literals.
+
+        Whilst the GeneticCodes must both be Tsetlin and have the same number of input and
+        response bits, they may have different numbers of clauses. The child will inherit the
+        number of clauses from the first parent (self) and may add or remove additional
+        clauses subject to mutation rate.
+
+        Clauses themselves are inherited from either parent at random, and each clause may
+        have its literals mutated according to the mutation rate.
+        """
+
+    def __setitem__(self, key: int, value: int) -> None:
+        raise NotImplementedError(
+            "GeneticCodeTsetlin does not support direct item assignment."
+        )
+
+    def __delitem__(self, key: int) -> None:
+        raise NotImplementedError("GeneticCodeTsetlin does not support item deletion.")
+
+    def __iter__(self) -> Iterator[int]:
+        return iter(range(self.input_bits))
+
+    def __len__(self) -> int:
+        return self.input_bits
+
+    # ------------------------------------------------------------------
+    # Checkpoint interface
+    # ------------------------------------------------------------------
+
+    def to_dict(self) -> dict[str, Any]:
+        d: dict[str, Any] = {
+            "type": "GeneticCodeTsetlin",
+            "schema_version": SCHEMA_VERSION,
+            "resp_bits": self.resp_bits,
+            "num_clauses": self.num_clauses,
+            "input_bits": self.input_bits,
+            "threshold": self.threshold,
+        }
+        if self._seed is not None:
+            d["seed"] = self._seed
+        return d
+
+    def to_arrays(self) -> dict[str, NDArray[uint64]]:
+        return {"w_pos": self._w_pos, "w_neg": self._w_neg}
+
+    @classmethod
+    def from_dict(
+        cls, d: dict[str, Any], arrays: dict[str, NDArray[Any]], **kwargs: Any
+    ) -> GeneticCodeTsetlin:
+        w_pos = arrays["w_pos"].astype(uint64, copy=False)
+        w_neg = arrays["w_neg"].astype(uint64, copy=False)
+        return cls(
+            code=(w_pos, w_neg),
+            seed=d.get("seed"),
+            resp_bits=d.get("resp_bits", 1),
+            num_clauses=d.get("num_clauses", 10),
+            input_bits=d.get("input_bits", 64),
+            threshold=d.get("threshold"),
+        )

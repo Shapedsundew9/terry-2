@@ -19,7 +19,7 @@ from arc3_agi.automaton import ActionStatus, AutomatonISBase
 from arc3_agi.checkpoint import CheckpointConfig
 from arc3_agi.environment import LayeredStaticBoolean2DGrid, StaticBoolean2DGrid
 from arc3_agi.fingerprint import FingerprintConfig
-from arc3_agi.genetic_code import GeneticCodeDict
+from arc3_agi.genetic_code import GeneticCodeDict, GeneticCodeTsetlin
 from arc3_agi.population import Population
 
 matplotlib.use("webagg")
@@ -231,10 +231,11 @@ class MazeAutomaton(AutomatonISBase):
             seed=kwargs.get("seed", None),
         )
         if self.genetic_code is None:
-            self.genetic_code = GeneticCodeDict(
-                {},
+            self.genetic_code = GeneticCodeTsetlin(
+                None,
                 seed=self.rng.randint(0, 2**32 - 1),
                 resp_bits=self.state_bits + self.resp_bits,
+                input_bits=self.env_bits + self.state_bits,
             )
         assert isinstance(
             self.environment, Maze

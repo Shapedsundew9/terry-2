@@ -709,6 +709,8 @@ def run_experiment(
 if __name__ == "__main__":
 
     params = default_experiment_params()
+    params["fingerprint_enabled"] = True
+    params["max_generations"] = 500
     run_experiment(
         name="baseline-state4-tsetlin",
         params=params,

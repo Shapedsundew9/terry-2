@@ -9,3 +9,4 @@ matplotlib
 tomli-w
 tomli
 psycopg[binary]
+datasets

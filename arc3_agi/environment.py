@@ -1,7 +1,7 @@
 from abc import abstractmethod
 from copy import deepcopy
 from enum import IntEnum
-from typing import Any
+from typing import Any, Sequence
 
 
 class Environment:
@@ -97,6 +97,59 @@ class Int1DArray(Environment):
             self._array[x] = kwargs.get("value", 0)
         else:
             raise IndexError("Coordinates out of bounds for Int1DArray.")
+
+
+class ByteEnv(Environment):
+    def __init__(self, name: str, **kwargs) -> None:
+        """Initializes a 1D array environment where each element is a string.
+
+        Args:
+            name: The name of the environment
+            description: An optional description of the environment.
+            array: A Sequence of Sequences that can be converted to bytes
+        """
+        super().__init__(
+            name,
+            description=kwargs.get(
+                "description",
+                "A string environment where each element is a string.",
+            ),
+        )
+        self._array: list[bytes] = [
+            bytes(seq, encoding=kwargs.get("encoding", "utf-8"))
+            for seq in kwargs.get("array", [])
+        ]
+
+    def get(self) -> list[bytes]:
+        """Returns the entire 1D array as a list of bytes."""
+        return self._array
+
+    def get_local(self, coords: list[int], **kwargs) -> int:
+        """Returns an integer representing the local environment at the given
+        coordinates.
+
+        Args:
+            coords: A list of [x, y] coordinates for the center of the local environment.
+                0: Index in the bytes object.
+                1: Index of the byte.
+
+        Returns:
+            The integer value of the bytes[coords[1]-1:coords[1]] stored at the given coordinate.
+            If coords[1] == 0 then the byte at -1 has a value of 0.
+        """
+        x = coords[0]
+        y = coords[1]
+        if 0 <= x < len(self._array) and 0 <= coords[1] < len(self._array[x]):
+            b = self._array[x]
+            return b[y] if not y else b[y - 1] << 8 | b[y]
+        else:
+            raise IndexError("Coordinates out of bounds for ByteEnv.")
+
+    def set(self, new_array: Sequence[str]) -> None:
+        raise NotImplementedError("ByteEnv does not support setting the entire array.")
+
+    def set_local(self, coords: list[int], **kwargs) -> None:
+        raise NotImplementedError("ByteEnv does not support setting local values.")
 
 
 class Boolean2DGrid(Environment):

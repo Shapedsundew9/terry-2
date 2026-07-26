@@ -101,7 +101,6 @@ def _make_tsetlin(
     *,
     seed: int,
     input_bits: int = 8,
-    threshold: int | float | None = None,
 ) -> GeneticCodeTsetlin:
     pos = np.asarray(w_pos, dtype=np.uint64)
     neg = np.asarray(w_neg, dtype=np.uint64)
@@ -109,9 +108,16 @@ def _make_tsetlin(
         code=(pos, neg),
         seed=seed,
         resp_bits=pos.shape[0],
+        num_clauses=pos.shape[1],
         input_bits=input_bits,
-        threshold=threshold,
     )
+
+
+def test_tsetlin_defaults_to_four_clauses_with_strict_majority() -> None:
+    code = GeneticCodeTsetlin(seed=1, resp_bits=2, input_bits=8)
+
+    assert code.num_clauses == 4
+    assert code.threshold == 3
 
 
 def test_tsetlin_crossover_is_reproducible_and_inherits_whole_clauses() -> None:
@@ -127,7 +133,7 @@ def test_tsetlin_crossover_is_reproducible_and_inherits_whole_clauses() -> None:
     )
     parent2 = _make_tsetlin(
         [[10, 20], [40, 80]],
-        [[11, 21], [41, 81]],
+        [[1, 1], [1, 1]],
         seed=99,
     )
 
@@ -158,7 +164,6 @@ def test_tsetlin_forced_mutation_changes_one_valid_literal_per_clause() -> None:
         [[0, 0, 0], [0, 0, 0]],
         seed=7,
         input_bits=8,
-        threshold=2,
     )
     parent2 = _make_tsetlin(
         [[0, 0], [0, 0]],
@@ -169,24 +174,27 @@ def test_tsetlin_forced_mutation_changes_one_valid_literal_per_clause() -> None:
 
     child = parent1.crossover(parent2, mutation_rate=1.0)
 
-    assert abs(child.num_clauses - parent1.num_clauses) == 1
-    assert child.num_clauses >= 1
-    assert child.threshold == pytest.approx(
-        parent1.threshold * child.num_clauses / parent1.num_clauses
-    )
+    assert child.num_clauses == parent1.num_clauses
+    assert child.threshold == 2
     assert np.all((child._w_pos & child._w_neg) == 0)
     literal_masks = child._w_pos | child._w_neg
     assert np.all(literal_masks != 0)
     assert np.all((literal_masks & (literal_masks - np.uint64(1))) == 0)
 
 
-def test_tsetlin_structural_mutation_never_removes_last_clause() -> None:
+def test_tsetlin_mutation_preserves_single_clause() -> None:
     parent1 = _make_tsetlin([[0]], [[0]], seed=17, input_bits=4)
     parent2 = _make_tsetlin([[0]], [[0]], seed=18, input_bits=4)
 
     child = parent1.crossover(parent2, mutation_rate=1.0)
 
-    assert child.num_clauses == 2
+    assert child.num_clauses == 1
+    assert child.threshold == 1
+
+
+def test_tsetlin_rejects_contradictory_clause_masks() -> None:
+    with pytest.raises(ValueError, match="contradictory"):
+        _make_tsetlin([[0b001]], [[0b001]], seed=1)
 
 
 @pytest.mark.parametrize("mutation_rate", [-0.01, 1.01, float("nan")])

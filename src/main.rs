@@ -100,12 +100,8 @@ struct Cli {
     code_type: String,
 
     /// Initial number of clauses per Tsetlin response bit.
-    #[arg(long, default_value_t = 10)]
+    #[arg(long, default_value_t = 4)]
     tsetlin_clauses: usize,
-
-    /// Initial Tsetlin vote threshold (default: strict majority).
-    #[arg(long)]
-    tsetlin_threshold: Option<f64>,
 
     /// Per-bit mutation rate for crossover.
     #[arg(long, default_value_t = 0.01)]
@@ -189,7 +185,6 @@ fn run_experiment(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         genetic_code: GeneticCodeConfig {
             kind: code_kind,
             tsetlin_clauses: cli.tsetlin_clauses,
-            tsetlin_threshold: cli.tsetlin_threshold,
         },
         fingerprint: cli.fingerprint.then_some(FingerprintConfig {
             bits: cli.fingerprint_bits,
@@ -231,7 +226,6 @@ fn run_experiment(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
             |summary| summary.code_type.clone(),
         ),
         "tsetlin_clauses": cli.tsetlin_clauses,
-        "tsetlin_threshold": cli.tsetlin_threshold,
         "fingerprint_enabled": cli.fingerprint,
         "fingerprint_bits": cli.fingerprint_bits,
         "fingerprint_tournament_k": cli.fingerprint_tournament_k,
@@ -363,12 +357,6 @@ fn validate_cli(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     if cli.tsetlin_clauses == 0 {
         return Err("tsetlin-clauses must be at least 1".into());
     }
-    if cli
-        .tsetlin_threshold
-        .is_some_and(|value| !value.is_finite())
-    {
-        return Err("tsetlin-threshold must be finite".into());
-    }
     if cli.fingerprint {
         FingerprintConfig {
             bits: cli.fingerprint_bits,
@@ -396,8 +384,7 @@ mod tests {
     fn cli_defaults_to_tsetlin() {
         let cli = Cli::try_parse_from(["maze-runner", "--name", "test"]).unwrap();
         assert_eq!(cli.code_type, "tsetlin");
-        assert_eq!(cli.tsetlin_clauses, 10);
-        assert_eq!(cli.tsetlin_threshold, None);
+        assert_eq!(cli.tsetlin_clauses, 4);
     }
 
     #[test]

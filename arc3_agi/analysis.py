@@ -20,6 +20,9 @@ from plotly.subplots import make_subplots
 
 from arc3_agi.experiment import ExperimentStore, resolve_database_url
 
+EXPERIMENT_ID = 122  # <-- change me
+EXPERIMENT_IDS = [124, 123, 121, EXPERIMENT_ID]  # <-- change me
+
 DATABASE_URL = os.environ.get("DATABASE_URL")
 store = ExperimentStore(DATABASE_URL)
 
@@ -40,8 +43,6 @@ display(
 # Set `EXPERIMENT_ID` to the `id` from the table above.
 
 # %%
-EXPERIMENT_ID = 98  # <-- change me
-
 df = store.load_stats(EXPERIMENT_ID)
 exp_name = experiments.loc[experiments["id"] == EXPERIMENT_ID, "name"].iat[0]
 
@@ -217,7 +218,6 @@ fig.show()
 # Set `EXPERIMENT_IDS` to a list of ids to compare on the same chart.
 
 # %%
-EXPERIMENT_IDS = [1, 55, 98]  # <-- change me
 
 exp_dfs = {}
 exp_names = {}
@@ -275,6 +275,36 @@ fig.update_layout(
     title="Mean-of-means fitness comparison (ribbon = ±1 std across populations)",
     xaxis_title="Generation",
     yaxis_title="Mean fitness",
+    template="plotly_white",
+    height=500,
+)
+fig.show()
+
+# %% [markdown]
+# ### Overlay — average generation duration per experiment
+
+# %%
+fig = go.Figure()
+
+for i, eid in enumerate(EXPERIMENT_IDS):
+    df_e = exp_dfs[eid]
+    average_duration = df_e.groupby("generation")["duration_s"].mean().reset_index()
+    colour = colours[i % len(colours)]
+
+    fig.add_trace(
+        go.Scatter(
+            x=average_duration["generation"],
+            y=average_duration["duration_s"],
+            mode="lines",
+            line=dict(color=colour, width=2),
+            name=exp_names[eid],
+        )
+    )
+
+fig.update_layout(
+    title="Average generation duration comparison",
+    xaxis_title="Generation",
+    yaxis_title="Average duration (s)",
     template="plotly_white",
     height=500,
 )
@@ -419,9 +449,13 @@ fig.show()
 
 # %%
 best_of_best = []
+empty_experiment_ids = []
 
 for eid in EXPERIMENT_IDS:
     df_e = exp_dfs[eid]
+    if df_e.empty:
+        empty_experiment_ids.append(eid)
+        continue
     best_row = df_e.loc[df_e["max_fitness"].idxmax()]
     best_of_best.append(
         {
@@ -433,7 +467,19 @@ for eid in EXPERIMENT_IDS:
         }
     )
 
-best_of_best_df = pd.DataFrame(best_of_best)
+if empty_experiment_ids:
+    print(f"Skipped experiments with no generation stats: {empty_experiment_ids}")
+
+best_of_best_df = pd.DataFrame(
+    best_of_best,
+    columns=[
+        "experiment_id",
+        "experiment_name",
+        "best_fitness",
+        "generation",
+        "pop_id",
+    ],
+)
 
 fig = px.bar(
     best_of_best_df,

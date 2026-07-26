@@ -267,9 +267,8 @@ class GeneticCodeTsetlin(GeneticCode):
         ) = None,  # [resp_bits, num_clauses]
         seed: int | None = None,
         resp_bits: int = 1,
-        num_clauses: int = 10,
+        num_clauses: int = 4,
         input_bits: int = 64,
-        threshold: int | float | None = None,
         missing_key_value_fn: Callable[[], int] | None = None,
     ) -> None:
         super().__init__(
@@ -281,9 +280,9 @@ class GeneticCodeTsetlin(GeneticCode):
         self._np_rng = random.default_rng(self._seed)
         self.num_clauses = num_clauses
         self.input_bits = input_bits
-
-        # Majority threshold: default is strict majority (> 50% of clauses voting TRUE)
-        self.threshold = threshold if threshold is not None else (num_clauses // 2) + 1
+        if self.num_clauses < 1:
+            raise ValueError("num_clauses must be at least 1.")
+        self.threshold = (num_clauses // 2) + 1
 
         # ------------------------------------------------------------------
         # Weight Matrix Initialization: Shape = (resp_bits, num_clauses)
@@ -291,13 +290,19 @@ class GeneticCodeTsetlin(GeneticCode):
         if code is not None:
             self._w_pos = code[0]
             self._w_neg = code[1]
-            self.num_clauses = self._w_pos.shape[1]
             assert (
                 self._w_pos.shape == self._w_neg.shape
             ), "Weight matrices must have the same shape."
             assert (
                 self._w_pos.shape[0] == resp_bits
             ), "Weight matrices must match the number of response bits."
+            assert (
+                self._w_pos.shape[1] == num_clauses
+            ), "Weight matrices must match the number of clauses."
+            if ((self._w_pos & self._w_neg) != 0).any():
+                raise ValueError(
+                    "Tsetlin clauses cannot contain contradictory literals."
+                )
         else:
             # Initialize sparse random masks if no weights are provided
             # Create empty weight matrices
@@ -356,14 +361,13 @@ class GeneticCodeTsetlin(GeneticCode):
 
         Each positive/negative mask pair is inherited atomically from a random
         clause in either parent. Parents may have different clause counts, but
-        must agree on input and response widths. With probability
-        ``mutation_rate`` the child adds or removes one clause, and each child
-        clause independently has one literal changed to either of its other two
-        valid states: ignored, required true, or required false.
+        must agree on input and response widths. Each child clause independently
+        has one literal changed to either of its other two valid states: ignored,
+        required true, or required false.
 
         The first parent's seeded NumPy generator owns all random choices. Its
-        threshold is preserved unless the clause count changes, in which case
-        the same voting ratio is retained.
+        The first parent's fixed clause count and strict-majority threshold are
+        preserved.
         """
         if not isinstance(other, GeneticCodeTsetlin):
             raise TypeError(
@@ -382,14 +386,7 @@ class GeneticCodeTsetlin(GeneticCode):
             raise ValueError("Tsetlin parents must have at least one input bit.")
 
         rng = self._np_rng
-        child_num_clauses = self.num_clauses
-        if mutation_rate > 0.0 and rng.random() < mutation_rate:
-            if child_num_clauses == 1 or rng.random() < 0.5:
-                child_num_clauses += 1
-            else:
-                child_num_clauses -= 1
-
-        shape = (self.resp_bits, child_num_clauses)
+        shape = (self.resp_bits, self.num_clauses)
         response_indices = array(range(self.resp_bits), dtype=int64)[:, None]
         self_clause_indices = rng.integers(self.num_clauses, size=shape)
         other_clause_indices = rng.integers(other.num_clauses, size=shape)
@@ -436,17 +433,12 @@ class GeneticCodeTsetlin(GeneticCode):
                 elif alternative == 1:
                     child_w_pos[row, column] |= bit_mask
 
-        threshold = self.threshold
-        if child_num_clauses != self.num_clauses:
-            threshold = self.threshold * child_num_clauses / self.num_clauses
-
         return self.__class__(
             code=(child_w_pos, child_w_neg),
             seed=int(rng.integers(0, 2**32)),
             resp_bits=self.resp_bits,
-            num_clauses=child_num_clauses,
+            num_clauses=self.num_clauses,
             input_bits=self.input_bits,
-            threshold=threshold,
         )
 
     def __setitem__(self, key: int, value: int) -> None:
@@ -495,5 +487,4 @@ class GeneticCodeTsetlin(GeneticCode):
             resp_bits=d.get("resp_bits", w_pos.shape[0]),
             num_clauses=d.get("num_clauses", w_pos.shape[1]),
             input_bits=d.get("input_bits", 64),
-            threshold=d.get("threshold"),
         )

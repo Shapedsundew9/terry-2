@@ -6,6 +6,8 @@
 /// bulk-upserts into `generation_stats`.
 use std::path::Path;
 
+use postgres::binary_copy::BinaryCopyInWriter;
+use postgres::types::Type;
 use postgres::{Client, NoTls};
 use serde_json::Value;
 
@@ -202,7 +204,7 @@ impl ExperimentStore {
         experiment_id: i64,
         run_dir: &Path,
     ) -> Result<usize, Box<dyn std::error::Error>> {
-        let mut total = 0usize;
+        let mut rows = Vec::new();
 
         // Collect pop_*/fitness_history.json paths.
         let mut fh_paths: Vec<std::path::PathBuf> = std::fs::read_dir(run_dir)?
@@ -227,33 +229,68 @@ impl ExperimentStore {
                 let mean_f = record["mean_fitness"].as_f64().unwrap_or(0.0) as f32;
                 let dur = record["duration_s"].as_f64().unwrap_or(0.0) as f32;
 
-                self.client.execute(
-                    "INSERT INTO generation_stats
-                        (experiment_id, pop_id, generation,
-                         min_fitness, max_fitness, mean_fitness, duration_s)
-                     VALUES ($1, $2, $3, $4, $5, $6, $7)
-                     ON CONFLICT (experiment_id, pop_id, generation)
-                     DO UPDATE SET
-                        min_fitness  = EXCLUDED.min_fitness,
-                        max_fitness  = EXCLUDED.max_fitness,
-                        mean_fitness = EXCLUDED.mean_fitness,
-                        duration_s   = EXCLUDED.duration_s",
-                    &[
-                        &experiment_id,
-                        &pop_id,
-                        &generation,
-                        &min_f,
-                        &max_f,
-                        &mean_f,
-                        &dur,
-                    ],
-                )?;
-                total += 1;
+                rows.push((experiment_id, pop_id, generation, min_f, max_f, mean_f, dur));
             }
         }
 
-        // Update pop_count / gen_count summary on experiments row.
-        self.client.execute(
+        let total = rows.len();
+        let mut transaction = self.client.transaction()?;
+        if !rows.is_empty() {
+            transaction.batch_execute(
+                "CREATE TEMP TABLE ingest_generation_stats
+                    (LIKE generation_stats INCLUDING DEFAULTS)
+                 ON COMMIT DROP",
+            )?;
+
+            let copy_sink = transaction.copy_in(
+                "COPY ingest_generation_stats
+                    (experiment_id, pop_id, generation,
+                     min_fitness, max_fitness, mean_fitness, duration_s)
+                 FROM STDIN BINARY",
+            )?;
+            let mut copy_writer = BinaryCopyInWriter::new(
+                copy_sink,
+                &[
+                    Type::INT8,
+                    Type::INT4,
+                    Type::INT4,
+                    Type::FLOAT4,
+                    Type::FLOAT4,
+                    Type::FLOAT4,
+                    Type::FLOAT4,
+                ],
+            );
+            for (experiment_id, pop_id, generation, min_f, max_f, mean_f, dur) in &rows {
+                copy_writer.write(&[
+                    experiment_id,
+                    pop_id,
+                    generation,
+                    min_f,
+                    max_f,
+                    mean_f,
+                    dur,
+                ])?;
+            }
+            copy_writer.finish()?;
+
+            transaction.execute(
+                "INSERT INTO generation_stats
+                    (experiment_id, pop_id, generation,
+                     min_fitness, max_fitness, mean_fitness, duration_s)
+                 SELECT experiment_id, pop_id, generation,
+                        min_fitness, max_fitness, mean_fitness, duration_s
+                 FROM ingest_generation_stats
+                 ON CONFLICT (experiment_id, pop_id, generation)
+                 DO UPDATE SET
+                    min_fitness  = EXCLUDED.min_fitness,
+                    max_fitness  = EXCLUDED.max_fitness,
+                    mean_fitness = EXCLUDED.mean_fitness,
+                    duration_s   = EXCLUDED.duration_s",
+                &[],
+            )?;
+        }
+
+        transaction.execute(
             "UPDATE experiments
              SET pop_count = (
                      SELECT COUNT(DISTINCT pop_id)
@@ -268,6 +305,7 @@ impl ExperimentStore {
              WHERE id = $1",
             &[&experiment_id],
         )?;
+        transaction.commit()?;
 
         Ok(total)
     }
@@ -339,6 +377,79 @@ mod tests {
         assert_eq!(row.get::<_, i32>(5), 0);
         assert_eq!(row.get::<_, i64>(6), 0);
         assert_eq!(final_status, "completed");
+        Ok(())
+    }
+
+    #[test]
+    fn ingest_run_bulk_upserts_generation_stats() -> Result<(), Box<dyn std::error::Error>> {
+        let Some(database_url) = test_database_url() else {
+            return Ok(());
+        };
+        let suffix = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+        let name = format!("rust-ingest-{}-{suffix}", std::process::id());
+        let run_dir = std::env::temp_dir().join(&name);
+        std::fs::create_dir_all(run_dir.join("pop_0"))?;
+        std::fs::create_dir_all(run_dir.join("pop_1"))?;
+        std::fs::write(
+            run_dir.join("pop_0/fitness_history.json"),
+            json!({
+                "pop_id": 0,
+                "history": [
+                    {"generation": 1, "min_fitness": 0.1, "max_fitness": 0.8,
+                     "mean_fitness": 0.4, "duration_s": 1.2},
+                    {"generation": 2, "min_fitness": 0.2, "max_fitness": 0.9,
+                     "mean_fitness": 0.5, "duration_s": 1.1}
+                ]
+            })
+            .to_string(),
+        )?;
+        std::fs::write(
+            run_dir.join("pop_1/fitness_history.json"),
+            json!({
+                "pop_id": 1,
+                "history": [
+                    {"generation": 1, "min_fitness": 0.3, "max_fitness": 0.7,
+                     "mean_fitness": 0.5, "duration_s": 1.0}
+                ]
+            })
+            .to_string(),
+        )?;
+
+        let mut store = ExperimentStore::connect(&database_url)?;
+        let (experiment_id, _) =
+            store.claim_experiment(&name, "bulk ingest", "test-run", &json!({}))?;
+        assert_eq!(store.ingest_run(experiment_id, &run_dir)?, 3);
+
+        std::fs::write(
+            run_dir.join("pop_1/fitness_history.json"),
+            json!({
+                "pop_id": 1,
+                "history": [
+                    {"generation": 1, "min_fitness": 0.4, "max_fitness": 1.0,
+                     "mean_fitness": 0.6, "duration_s": 0.9}
+                ]
+            })
+            .to_string(),
+        )?;
+        assert_eq!(store.ingest_run(experiment_id, &run_dir)?, 3);
+
+        let row = store.client.query_one(
+            "SELECT pop_count, gen_count,
+                    (SELECT COUNT(*) FROM generation_stats WHERE experiment_id = $1),
+                    (SELECT max_fitness FROM generation_stats
+                     WHERE experiment_id = $1 AND pop_id = 1 AND generation = 1)
+             FROM experiments WHERE id = $1",
+            &[&experiment_id],
+        )?;
+        store
+            .client
+            .execute("DELETE FROM experiments WHERE id = $1", &[&experiment_id])?;
+        std::fs::remove_dir_all(run_dir)?;
+
+        assert_eq!(row.get::<_, i32>(0), 2);
+        assert_eq!(row.get::<_, i32>(1), 2);
+        assert_eq!(row.get::<_, i64>(2), 3);
+        assert_eq!(row.get::<_, f32>(3), 1.0);
         Ok(())
     }
 }

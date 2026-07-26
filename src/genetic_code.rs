@@ -31,15 +31,13 @@ impl GeneticCodeKind {
 pub struct GeneticCodeConfig {
     pub kind: GeneticCodeKind,
     pub tsetlin_clauses: usize,
-    pub tsetlin_threshold: Option<f64>,
 }
 
 impl Default for GeneticCodeConfig {
     fn default() -> Self {
         Self {
             kind: GeneticCodeKind::Tsetlin,
-            tsetlin_clauses: 10,
-            tsetlin_threshold: None,
+            tsetlin_clauses: 4,
         }
     }
 }
@@ -77,7 +75,6 @@ impl GeneticCode {
                 output_bits,
                 config.tsetlin_clauses,
                 input_bits,
-                config.tsetlin_threshold,
                 seed,
             )?)),
         }
@@ -299,14 +296,10 @@ impl GeneticCodeTsetlin {
         output_bits: u8,
         num_clauses: usize,
         input_bits: u8,
-        threshold: Option<f64>,
         seed: u64,
     ) -> Result<Self, String> {
         Self::validate_dimensions(output_bits, num_clauses, input_bits)?;
-        let threshold = threshold.unwrap_or((num_clauses / 2 + 1) as f64);
-        if !threshold.is_finite() {
-            return Err("Tsetlin threshold must be finite".into());
-        }
+        let threshold = (num_clauses / 2 + 1) as f64;
 
         let len = output_bits as usize * num_clauses;
         let mut w_pos = vec![0u64; len];
@@ -344,7 +337,6 @@ impl GeneticCodeTsetlin {
         output_bits: u8,
         num_clauses: usize,
         input_bits: u8,
-        threshold: f64,
         seed: Option<u64>,
     ) -> Result<Self, String> {
         Self::validate_dimensions(output_bits, num_clauses, input_bits)?;
@@ -353,9 +345,6 @@ impl GeneticCodeTsetlin {
             return Err(format!(
                 "Tsetlin masks must each contain {expected} elements"
             ));
-        }
-        if !threshold.is_finite() {
-            return Err("Tsetlin threshold must be finite".into());
         }
         let input_mask = if input_bits == 64 {
             u64::MAX
@@ -369,13 +358,20 @@ impl GeneticCodeTsetlin {
         {
             return Err("Tsetlin mask contains literals outside input_bits".into());
         }
+        if w_pos
+            .iter()
+            .zip(&w_neg)
+            .any(|(positive, negative)| positive & negative != 0)
+        {
+            return Err("Tsetlin clauses cannot contain contradictory literals".into());
+        }
         Ok(Self {
             w_pos,
             w_neg,
             output_bits,
             num_clauses,
             input_bits,
-            threshold,
+            threshold: (num_clauses / 2 + 1) as f64,
             seed,
         })
     }
@@ -435,23 +431,14 @@ impl GeneticCodeTsetlin {
             return Err("mutation_rate must be between 0 and 1 inclusive".into());
         }
 
-        let mut child_num_clauses = self.num_clauses;
-        if mutation_rate > 0.0 && unit_f64(rng) < mutation_rate {
-            if child_num_clauses == 1 || unit_f64(rng) < 0.5 {
-                child_num_clauses += 1;
-            } else {
-                child_num_clauses -= 1;
-            }
-        }
-
-        let len = self.output_bits as usize * child_num_clauses;
+        let len = self.output_bits as usize * self.num_clauses;
         let mut child_w_pos = Vec::with_capacity(len);
         let mut child_w_neg = Vec::with_capacity(len);
 
         for response_bit in 0..self.output_bits as usize {
             let self_start = response_bit * self.num_clauses;
             let other_start = response_bit * other.num_clauses;
-            for _ in 0..child_num_clauses {
+            for _ in 0..self.num_clauses {
                 let (source, source_start, source_len) = if unit_f64(rng) < 0.5 {
                     (self, self_start, self.num_clauses)
                 } else {
@@ -486,19 +473,12 @@ impl GeneticCodeTsetlin {
             }
         }
 
-        let threshold = if child_num_clauses == self.num_clauses {
-            self.threshold
-        } else {
-            self.threshold * child_num_clauses as f64 / self.num_clauses as f64
-        };
-
         Self::from_masks(
             child_w_pos,
             child_w_neg,
             self.output_bits,
-            child_num_clauses,
+            self.num_clauses,
             self.input_bits,
-            threshold,
             Some(rng.next_u32() as u64),
         )
     }
@@ -645,7 +625,6 @@ mod tests {
             2,
             2,
             4,
-            2.0,
             Some(7),
         )
         .unwrap();
@@ -656,12 +635,12 @@ mod tests {
 
     #[test]
     fn tsetlin_initialization_is_seeded_and_valid() {
-        let first = GeneticCodeTsetlin::new(6, 10, 13, None, 42).unwrap();
-        let second = GeneticCodeTsetlin::new(6, 10, 13, None, 42).unwrap();
+        let first = GeneticCodeTsetlin::new(6, 4, 13, 42).unwrap();
+        let second = GeneticCodeTsetlin::new(6, 4, 13, 42).unwrap();
 
         assert_eq!(first.positive_masks(), second.positive_masks());
         assert_eq!(first.negative_masks(), second.negative_masks());
-        assert_eq!(first.threshold(), 6.0);
+        assert_eq!(first.threshold(), 3.0);
         assert!(first
             .positive_masks()
             .iter()
@@ -677,17 +656,15 @@ mod tests {
             2,
             3,
             8,
-            2.0,
             Some(1),
         )
         .unwrap();
         let parent_b = GeneticCodeTsetlin::from_masks(
             vec![10, 20, 40, 80],
-            vec![11, 21, 41, 81],
+            vec![1, 1, 1, 1],
             2,
             2,
             8,
-            2.0,
             Some(2),
         )
         .unwrap();
@@ -714,36 +691,25 @@ mod tests {
     }
 
     #[test]
-    fn tsetlin_forced_mutation_changes_structure_and_valid_literals() {
+    fn tsetlin_forced_mutation_preserves_structure_and_valid_literals() {
         let parent = GeneticCodeTsetlin::from_masks(
             vec![0, 0, 0, 0, 0, 0],
             vec![0, 0, 0, 0, 0, 0],
             2,
             3,
             8,
-            2.0,
             Some(1),
         )
         .unwrap();
-        let other = GeneticCodeTsetlin::from_masks(
-            vec![0, 0, 0, 0],
-            vec![0, 0, 0, 0],
-            2,
-            2,
-            8,
-            2.0,
-            Some(2),
-        )
-        .unwrap();
+        let other =
+            GeneticCodeTsetlin::from_masks(vec![0, 0, 0, 0], vec![0, 0, 0, 0], 2, 2, 8, Some(2))
+                .unwrap();
         let mut rng = StdRng::seed_from_u64(4);
 
         let child = parent.crossover_with_rng(&other, 1.0, &mut rng).unwrap();
 
-        assert_eq!(child.num_clauses().abs_diff(parent.num_clauses()), 1);
-        assert_eq!(
-            child.threshold(),
-            parent.threshold() * child.num_clauses() as f64 / parent.num_clauses() as f64
-        );
+        assert_eq!(child.num_clauses(), parent.num_clauses());
+        assert_eq!(child.threshold(), 2.0);
         for (positive, negative) in child.w_pos.iter().zip(&child.w_neg) {
             assert_eq!(positive & negative, 0);
             let literals = positive | negative;
@@ -753,11 +719,19 @@ mod tests {
 
     #[test]
     fn tsetlin_rejects_invalid_mutation_rate() {
-        let parent = GeneticCodeTsetlin::new(2, 2, 8, None, 1).unwrap();
+        let parent = GeneticCodeTsetlin::new(2, 2, 8, 1).unwrap();
         let mut rng = StdRng::seed_from_u64(2);
 
         for rate in [-0.01, 1.01, f64::NAN] {
             assert!(parent.crossover_with_rng(&parent, rate, &mut rng).is_err());
         }
+    }
+
+    #[test]
+    fn tsetlin_rejects_contradictory_clause_masks() {
+        let error = GeneticCodeTsetlin::from_masks(vec![1], vec![1], 1, 1, 8, Some(1))
+            .err()
+            .unwrap();
+        assert!(error.contains("contradictory"));
     }
 }

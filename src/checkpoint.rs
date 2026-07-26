@@ -212,7 +212,6 @@ pub fn load_population(
     let mut state_bits = None;
     let mut code_kind = None;
     let mut initial_clauses = 10usize;
-    let mut initial_threshold = None;
     for (index, value) in automata_meta.iter().enumerate() {
         let table = value_table(value, "automaton")?;
         let current_state_bits = u8_value(table, "state_bits")?;
@@ -292,11 +291,8 @@ pub fn load_population(
                     );
                 }
                 let input_bits = u8_value_default(genetic_meta, "input_bits", 64)?;
-                let threshold = optional_number(genetic_meta, "threshold")?
-                    .unwrap_or((metadata_clauses / 2 + 1) as f64);
                 if index == 0 {
                     initial_clauses = clauses;
-                    initial_threshold = Some(threshold);
                 }
                 GeneticCode::Tsetlin(GeneticCodeTsetlin::from_masks(
                     positive.iter().copied().collect(),
@@ -304,7 +300,6 @@ pub fn load_population(
                     output_bits,
                     clauses,
                     input_bits,
-                    threshold,
                     seed,
                 )?)
             }
@@ -369,7 +364,6 @@ pub fn load_population(
         genetic_code: GeneticCodeConfig {
             kind,
             tsetlin_clauses: initial_clauses,
-            tsetlin_threshold: initial_threshold,
         },
         fingerprint: fingerprint_config,
     };
@@ -828,9 +822,9 @@ assert len(population.automata) == 2
 assert population._fingerprint_config.bits == 4
 for automaton in population.automata:
     assert isinstance(automaton.genetic_code, GeneticCodeTsetlin)
-    assert automaton.genetic_code._w_pos.shape == (6, 10)
-    assert automaton.genetic_code._w_neg.shape == (6, 10)
-    assert automaton.genetic_code.threshold == 6.0
+    assert automaton.genetic_code._w_pos.shape == (6, 4)
+    assert automaton.genetic_code._w_neg.shape == (6, 4)
+    assert automaton.genetic_code.threshold == 3.0
     assert automaton.fingerprint is not None
 "#,
             stem = stem.display().to_string()

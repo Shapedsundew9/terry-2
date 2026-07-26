@@ -19,18 +19,18 @@ Select a model explicitly with `--code-type tsetlin|dict|list`:
 cargo run --release --bin maze-runner -- \
   --name tsetlin-20-clauses \
   --code-type tsetlin \
-  --tsetlin-clauses 20 \
-  --tsetlin-threshold 11
+  --tsetlin-clauses 20
 
 cargo run --release --bin maze-runner -- \
   --name dict-control \
   --code-type dict
 ```
 
-When omitted, the Tsetlin threshold is a strict majority of the initial clause
-count. Input width is `9 + state_bits`; output width is `state_bits + 2`.
-Tsetlin starts with 10 clauses and a 5% active-literal probability, matching the
-Python `GeneticCodeTsetlin` defaults.
+The Tsetlin threshold is always a strict majority of the configured clause
+count. Clause count and threshold remain fixed during crossover. Input width is
+`9 + state_bits`; output width is `state_bits + 2`. Tsetlin starts with 4 clauses
+and a 5% active-literal probability, matching the Python
+`GeneticCodeTsetlin` defaults.
 
 Selection fingerprints are optional for fresh Rust runs:
 
@@ -60,8 +60,8 @@ cargo run --release --bin maze-runner -- \
 
 The `.toml` or `.npz` suffix may be supplied; the shared stem is used. The
 checkpoint supplies population size, state width, genetic-code representation,
-evolved clause counts and thresholds, fingerprint configuration, and existing
-fitness history. CLI values still control ticks, restarts, mutation rate,
+fixed clause count, fingerprint configuration, and existing fitness history.
+CLI values still control ticks, restarts, mutation rate,
 checkpoint interval, continuation seed, output directory, and target generation.
 
 The checkpoint environment name is used automatically. `--maze-name` can
@@ -83,8 +83,9 @@ Rust writes the existing schema-v1 TOML/NPZ format:
 - Tsetlin: `automaton_N_w_pos` and `automaton_N_w_neg` as row-major `uint64`
   matrices shaped `[response_bits, clauses]`.
 - Energy grids are `uint8`; full fitness history is `float64`.
-- Tsetlin metadata includes response width, clause count, input width, threshold,
-  and seed. Integer and floating legacy thresholds are accepted.
+- Tsetlin metadata includes response width, clause count, input width, derived
+  threshold, and seed. Legacy threshold values are accepted but the strict
+  majority is derived from the clause count when loading.
 - Fingerprint configuration and per-automaton fingerprint values round-trip.
 
 Python `Population.load` can load Rust checkpoints, and Rust can load Python
@@ -106,6 +107,6 @@ history from generation 1 through the target.
 cargo bench --bench tsetlin
 ```
 
-The benchmark measures the default 6-output-bit by 10-clause lookup and
+The benchmark measures the default 6-output-bit by 4-clause lookup and
 crossover paths. Lookup uses flat row-major `u64` masks and performs no heap
 allocation or virtual dispatch per tick.

@@ -34,3 +34,7 @@ criterion = "0.5"
 [[bench]]
 name = "tsetlin"
 harness = false
+
+[profile.release]
+codegen-units = 1
+lto = "thin"

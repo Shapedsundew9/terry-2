@@ -134,9 +134,7 @@ class FitnessHistoryRenderer:
         self.fig.canvas.draw()
         self.fig.canvas.flush_events()
 
-    def update(self, fitnesses: Sequence[float]) -> None:
-        self._means.append(sum(fitnesses) / len(fitnesses))
-        self._maxes.append(max(fitnesses))
+    def _redraw(self) -> None:
         generations = list(range(1, len(self._means) + 1))
         mean_average = _moving_average(self._means, self._window)
         max_average = _moving_average(self._maxes, self._window)
@@ -180,6 +178,17 @@ class FitnessHistoryRenderer:
         self.fig.tight_layout()
         self.fig.canvas.draw_idle()
 
+    def update(self, fitnesses: Sequence[float], *, render: bool = True) -> None:
+        self._means.append(sum(fitnesses) / len(fitnesses))
+        self._maxes.append(max(fitnesses))
+        if render:
+            self._redraw()
+
+    def render(self) -> None:
+        if not self._means:
+            return
+        self._redraw()
+
     def is_open(self) -> bool:
         return plt.fignum_exists(self.fig.number)
 
@@ -195,6 +204,7 @@ class FitnessRenderer:
         if self.fig.canvas.manager is not None:
             self.fig.canvas.manager.set_window_title("Fitness Distribution")
         self.generation = 0
+        self._latest_fitnesses: Sequence[float] = ()
         self.ax.set_xlabel("Fitness")
         self.ax.set_ylabel("Count")
         self.ax.set_title("Generation 0 \u2013 Fitness Distribution")
@@ -202,8 +212,10 @@ class FitnessRenderer:
         self.fig.canvas.draw()
         self.fig.canvas.flush_events()
 
-    def update(self, fitnesses: Sequence[float]) -> None:
-        self.generation += 1
+    def _redraw(self) -> None:
+        if not self._latest_fitnesses:
+            return
+        fitnesses = self._latest_fitnesses
         self.ax.cla()
         self.ax.hist(fitnesses, bins=20, color="steelblue", edgecolor="black")
         minimum = min(fitnesses)
@@ -225,6 +237,15 @@ class FitnessRenderer:
         self.ax.legend()
         self.fig.tight_layout()
         self.fig.canvas.draw_idle()
+
+    def update(self, fitnesses: Sequence[float], *, render: bool = True) -> None:
+        self.generation += 1
+        self._latest_fitnesses = fitnesses
+        if render:
+            self._redraw()
+
+    def render(self) -> None:
+        self._redraw()
 
     def is_open(self) -> bool:
         return plt.fignum_exists(self.fig.number)
@@ -249,10 +270,9 @@ class GenerationsPerSecondRenderer:
         self.fig.canvas.draw()
         self.fig.canvas.flush_events()
 
-    def update(self, duration_s: float | None) -> None:
-        if duration_s is None or duration_s <= 0.0:
+    def _redraw(self) -> None:
+        if not self._rates:
             return
-        self._rates.append(1.0 / duration_s)
         generations = list(range(1, len(self._rates) + 1))
         moving_average = _moving_average(self._rates, self._window)
         self.ax.cla()
@@ -278,6 +298,16 @@ class GenerationsPerSecondRenderer:
         self.ax.legend()
         self.fig.tight_layout()
         self.fig.canvas.draw_idle()
+
+    def update(self, duration_s: float | None, *, render: bool = True) -> None:
+        if duration_s is None or duration_s <= 0.0:
+            return
+        self._rates.append(1.0 / duration_s)
+        if render:
+            self._redraw()
+
+    def render(self) -> None:
+        self._redraw()
 
     def is_open(self) -> bool:
         return plt.fignum_exists(self.fig.number)
@@ -305,18 +335,9 @@ class FitnessRateRenderer:
         self.fig.canvas.draw()
         self.fig.canvas.flush_events()
 
-    def update(self, fitnesses: Sequence[float]) -> None:
-        current_max = max(fitnesses)
-        current_mean = sum(fitnesses) / len(fitnesses)
-        if self._prev_max is None or self._prev_mean is None:
-            self._delta_maxes.append(float("nan"))
-            self._delta_means.append(float("nan"))
-        else:
-            self._delta_maxes.append(current_max - self._prev_max)
-            self._delta_means.append(current_mean - self._prev_mean)
-        self._prev_max = current_max
-        self._prev_mean = current_mean
-
+    def _redraw(self) -> None:
+        if not self._delta_maxes:
+            return
         generations = list(range(1, len(self._delta_maxes) + 1))
         max_average = _moving_average(self._delta_maxes, self._window)
         mean_average = _moving_average(self._delta_means, self._window)
@@ -343,6 +364,23 @@ class FitnessRateRenderer:
         self.fig.tight_layout()
         self.fig.canvas.draw_idle()
 
+    def update(self, fitnesses: Sequence[float], *, render: bool = True) -> None:
+        current_max = max(fitnesses)
+        current_mean = sum(fitnesses) / len(fitnesses)
+        if self._prev_max is None or self._prev_mean is None:
+            self._delta_maxes.append(float("nan"))
+            self._delta_means.append(float("nan"))
+        else:
+            self._delta_maxes.append(current_max - self._prev_max)
+            self._delta_means.append(current_mean - self._prev_mean)
+        self._prev_max = current_max
+        self._prev_mean = current_mean
+        if render:
+            self._redraw()
+
+    def render(self) -> None:
+        self._redraw()
+
     def is_open(self) -> bool:
         return plt.fignum_exists(self.fig.number)
 
@@ -356,6 +394,7 @@ class FingerprintClusterRenderer:
     def __init__(self) -> None:
         self._generation = 0
         self._cbar = None
+        self._latest_snapshot: PopulationGenerationSnapshot | None = None
         self.fig, self.ax = plt.subplots(figsize=(6, 5))
         if self.fig.canvas.manager is not None:
             self.fig.canvas.manager.set_window_title("Fingerprint Clusters")
@@ -366,7 +405,10 @@ class FingerprintClusterRenderer:
         self.fig.canvas.draw()
         self.fig.canvas.flush_events()
 
-    def update(self, snapshot: PopulationGenerationSnapshot) -> None:
+    def _redraw(self) -> None:
+        snapshot = self._latest_snapshot
+        if snapshot is None:
+            return
         members = [
             automaton
             for automaton in snapshot.automata
@@ -419,7 +461,6 @@ class FingerprintClusterRenderer:
 
         largest_group = int(aggregate_count.max())
         sizes = 30 + 570 * (aggregate_count / max(largest_group, 1))
-        self._generation += 1
         minimum_fitness = float(fitnesses.min())
         maximum_fitness = float(fitnesses.max())
         fitness_range = (
@@ -466,6 +507,25 @@ class FingerprintClusterRenderer:
         self.fig.tight_layout()
         self.fig.canvas.draw_idle()
 
+    def update(
+        self, snapshot: PopulationGenerationSnapshot, *, render: bool = True
+    ) -> None:
+        members = [
+            automaton
+            for automaton in snapshot.automata
+            if automaton.fingerprint_bits is not None
+            and automaton.fingerprint_value is not None
+        ]
+        if not members:
+            return
+        self._generation += 1
+        self._latest_snapshot = snapshot
+        if render:
+            self._redraw()
+
+    def render(self) -> None:
+        self._redraw()
+
     def is_open(self) -> bool:
         return plt.fignum_exists(self.fig.number)
 
@@ -503,15 +563,33 @@ class PopulationChartSuite:
         self,
         snapshot: PopulationGenerationSnapshot,
         duration_s: float | None,
+        *,
+        render: bool = True,
     ) -> None:
         fitnesses = snapshot.fitnesses
         if not fitnesses:
             return
-        self.fitness.update(fitnesses)
-        self.fitness_history.update(fitnesses)
-        self.generations_per_second.update(duration_s)
-        self.fitness_rate.update(fitnesses)
-        self.fingerprint_clusters.update(snapshot)
+        self.fitness.update(fitnesses, render=render)
+        self.fitness_history.update(fitnesses, render=render)
+        self.generations_per_second.update(duration_s, render=render)
+        self.fitness_rate.update(fitnesses, render=render)
+        self.fingerprint_clusters.update(snapshot, render=render)
+
+    def render(self) -> None:
+        self.fitness.render()
+        self.fitness_history.render()
+        self.generations_per_second.render()
+        self.fitness_rate.render()
+        self.fingerprint_clusters.render()
+
+    def update_batch(
+        self,
+        snapshots: Sequence[PopulationGenerationSnapshot],
+        durations_s: Sequence[float | None],
+    ) -> None:
+        for snapshot, duration_s in zip(snapshots, durations_s):
+            self.update(snapshot, duration_s, render=False)
+        self.render()
 
     def is_open(self) -> bool:
         return any(renderer.is_open() for renderer in self._renderers)

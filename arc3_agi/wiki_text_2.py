@@ -16,6 +16,7 @@ if TYPE_CHECKING:
 
 
 TICKS_PER_GENERATION = 1000
+GENERATIONS_PER_CHART_UPDATE = 10
 
 
 class PopulationCharts(Protocol):
@@ -55,6 +56,7 @@ class WikiAutomaton(AutomatonISBase):
                 seed=self.rng.randint(0, 2**32 - 1),
                 resp_bits=self.state_bits + self.resp_bits,
                 input_bits=self.env_bits + self.state_bits,
+                num_clauses=kwargs.get("num_clauses", 16),
             )
         assert isinstance(
             self.environment, ByteEnv
@@ -94,9 +96,7 @@ class WikiAutomaton(AutomatonISBase):
         self.remaining_bytes -= 1  # Decrement the remaining bytes to read.
         self.coords[1] += 1  # Move to the next byte in the current bytes object.
         actual = (
-            0
-            if not self.remaining_bytes
-            else texts[self.coords[0]][self.coords[1]]
+            0 if not self.remaining_bytes else texts[self.coords[0]][self.coords[1]]
         )
         if prediction == actual:
             self.right += 1  # Increment the count of correct predictions.
@@ -127,6 +127,7 @@ def run_charted_generation(
     population: Population,
     charts: PopulationCharts,
     ticks_per_generation: int = TICKS_PER_GENERATION,
+    update_chart: bool = True,
 ) -> PopulationGenerationSnapshot:
     """Evaluate, evolve, and render one population generation."""
     from arc3_agi.population_rendering import PopulationGenerationSnapshot
@@ -134,7 +135,8 @@ def run_charted_generation(
     population.run_generation(ticks_per_generation)
     snapshot = PopulationGenerationSnapshot.capture(population.automata)
     population.evolve()
-    charts.update(snapshot, population.fitness_history[-1].get("duration_s"))
+    if update_chart:
+        charts.update(snapshot, population.fitness_history[-1].get("duration_s"))
     return snapshot
 
 
@@ -156,6 +158,7 @@ def run_live() -> None:
         checkpoint_config=CheckpointConfig(enabled=False),
         fingerprint_config=FingerprintConfig(bits=4, tournament_k=4),
     )
+    generations_per_chart_update = max(1, GENERATIONS_PER_CHART_UPDATE)
     stopped = False
 
     def stop() -> None:
@@ -170,7 +173,21 @@ def run_live() -> None:
         if stopped:
             return
         try:
-            run_charted_generation(population, charts)
+            # Collect each generation so chart history stays full-fidelity,
+            # then render once per batch to reduce UI overhead.
+            pending_snapshots = []
+            pending_durations = []
+            for _ in range(generations_per_chart_update):
+                snapshot = run_charted_generation(
+                    population,
+                    charts,
+                    update_chart=False,
+                )
+                pending_snapshots.append(snapshot)
+                pending_durations.append(
+                    population.fitness_history[-1].get("duration_s")
+                )
+            charts.update_batch(pending_snapshots, pending_durations)
         except Exception:
             traceback.print_exc()
             stop()

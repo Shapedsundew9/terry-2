@@ -710,7 +710,7 @@ if __name__ == "__main__":
 
     params = default_experiment_params()
     params["fingerprint_enabled"] = True
-    params["max_generations"] = 500
+    params["max_generations"] = 1000
     run_experiment(
         name="baseline-state4-tsetlin",
         params=params,
@@ -718,13 +718,13 @@ if __name__ == "__main__":
     )
     params["automaton_params"]["state_bits"] = 3
     run_experiment(
-        name="baseline-state3",
+        name="baseline-state3-tsetlin",
         params=params,
         description="Baseline maze evolution run with 3 state bits.",
     )
     params["automaton_params"]["state_bits"] = 5
     run_experiment(
-        name="baseline-state5",
+        name="baseline-state5-tsetlin",
         params=params,
         description="Baseline maze evolution run with 5 state bits.",
     )

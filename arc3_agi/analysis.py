@@ -40,7 +40,7 @@ display(
 # Set `EXPERIMENT_ID` to the `id` from the table above.
 
 # %%
-EXPERIMENT_ID = 42  # <-- change me
+EXPERIMENT_ID = 98  # <-- change me
 
 df = store.load_stats(EXPERIMENT_ID)
 exp_name = experiments.loc[experiments["id"] == EXPERIMENT_ID, "name"].iat[0]
@@ -217,7 +217,7 @@ fig.show()
 # Set `EXPERIMENT_IDS` to a list of ids to compare on the same chart.
 
 # %%
-EXPERIMENT_IDS = [1, 2, 42, 44, 45]  # <-- change me
+EXPERIMENT_IDS = [1, 55, 98]  # <-- change me
 
 exp_dfs = {}
 exp_names = {}

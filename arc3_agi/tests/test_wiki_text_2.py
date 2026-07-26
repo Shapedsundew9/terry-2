@@ -48,6 +48,27 @@ def test_dataset_loader_filters_empty_text(monkeypatch) -> None:
     load_wikitext_environment.cache_clear()
 
 
+def test_dataset_loader_forwards_coordinates_and_caches(monkeypatch) -> None:
+    import datasets
+
+    calls: list[tuple[str, str]] = []
+
+    def fake_load_dataset(name: str, config: str):
+        calls.append((name, config))
+        return {"validation": {"text": ["custom"]}}
+
+    load_wikitext_environment.cache_clear()
+    monkeypatch.setattr(datasets, "load_dataset", fake_load_dataset)
+
+    first = load_wikitext_environment("example/wiki", "raw", "validation")
+    second = load_wikitext_environment("example/wiki", "raw", "validation")
+
+    assert first is second
+    assert first.get() == [b"custom"]
+    assert calls == [("example/wiki", "raw")]
+    load_wikitext_environment.cache_clear()
+
+
 def test_population_forwards_fingerprint_configuration() -> None:
     config = FingerprintConfig(bits=4, tournament_k=2)
     population = WikiPopulation(

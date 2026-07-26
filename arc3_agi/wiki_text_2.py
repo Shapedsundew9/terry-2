@@ -17,6 +17,9 @@ if TYPE_CHECKING:
 
 TICKS_PER_GENERATION = 1000
 GENERATIONS_PER_CHART_UPDATE = 10
+WIKITEXT_DATASET_NAME = "Salesforce/wikitext"
+WIKITEXT_DATASET_CONFIG = "wikitext-2-raw-v1"
+WIKITEXT_SPLIT = "train"
 
 
 class PopulationCharts(Protocol):
@@ -28,13 +31,17 @@ class PopulationCharts(Protocol):
 
 
 @lru_cache(maxsize=1)
-def load_wikitext_environment() -> ByteEnv:
+def load_wikitext_environment(
+    dataset_name: str = WIKITEXT_DATASET_NAME,
+    dataset_config: str = WIKITEXT_DATASET_CONFIG,
+    split: str = WIKITEXT_SPLIT,
+) -> ByteEnv:
     """Load WikiText 2 on first use and return it as a byte environment."""
     from datasets import load_dataset
 
-    wikitext = load_dataset("Salesforce/wikitext", "wikitext-2-raw-v1")
-    train = cast(Any, wikitext)["train"]
-    texts = [text for text in train["text"] if text]
+    wikitext = load_dataset(dataset_name, dataset_config)
+    dataset_split = cast(Any, wikitext)[split]
+    texts = [text for text in dataset_split["text"] if text]
     return ByteEnv(name="WikiEnv", array=texts, encoding="utf-8")
 
 

@@ -24,12 +24,14 @@ or import and call :func:`run` or :func:`run_pool` from another script.
 
 from __future__ import annotations
 
-import math
-import sys
 import time
 from pathlib import Path
 from typing import Any
 
+from arc3_agi.batch_runner import generate_run_id as _generate_run_id
+from arc3_agi.batch_runner import run_batch as _run_batch
+from arc3_agi.batch_runner import run_pool as _run_population_pool
+from arc3_agi.batch_runner import run_tracked_experiment as _run_tracked_experiment
 from arc3_agi.checkpoint import CheckpointConfig
 from arc3_agi.experiment import ExperimentStore
 from arc3_agi.fingerprint import FingerprintConfig
@@ -38,8 +40,6 @@ from arc3_agi.runner import (
     PopulationConfig,
     PopulationHandle,
     launch_populations,
-    stop_all,
-    wait_all,
 )
 
 # ---------------------------------------------------------------------------
@@ -106,153 +106,6 @@ POLL_INTERVAL_S: float = 2.0
 
 BASE_DIR: Path = Path("runs")
 """Root directory under which per-run checkpoint folders are created."""
-
-# ---------------------------------------------------------------------------
-# Internal helpers
-# ---------------------------------------------------------------------------
-
-# ANSI escape codes — used only when stdout is an interactive TTY.
-_CSI = "\033["
-_CURSOR_UP = _CSI + "{}A"  # move cursor up N lines
-_ERASE_LINE = _CSI + "2K\r"  # erase entire current line
-
-
-def _is_tty() -> bool:
-    return hasattr(sys.stdout, "isatty") and sys.stdout.isatty()
-
-
-def _generate_run_id() -> str:
-    """Return a unique run identifier for grouping checkpoint output."""
-    import secrets as _secrets
-    from datetime import datetime as _datetime
-
-    return _datetime.now().strftime("%Y%m%dT%H%M%S") + "_" + _secrets.token_hex(3)
-
-
-def _format_table(
-    handles: list[PopulationHandle],
-    max_generations: int,
-    elapsed_s: float,
-    completed_snapshots: list[dict] | None = None,
-    total_populations: int | None = None,
-) -> list[str]:
-    """Return a list of formatted status lines (one per population + header)."""
-    done = sum(1 for h in handles if not h.is_running)
-    if completed_snapshots is None:
-        header = f"  Elapsed: {elapsed_s:6.0f}s   Finished: {done}/{len(handles)} populations"
-    else:
-        total = (
-            total_populations if total_populations is not None else TOTAL_POPULATIONS
-        )
-        header = (
-            f"  Elapsed: {elapsed_s:6.0f}s   Active: {done}/{len(handles)} done"
-            f"   Completed: {len(completed_snapshots)}/{total} total"
-        )
-    lines: list[str] = [
-        header,
-        f"  {'Pop':>3}  {'Gen':>6}/{max_generations:<6}  {'Max fit':>9}  {'Mean fit':>9}  "
-        f"{'Best Max':>9}  {'Best Mean':>9}  {'Status':<8}",
-        "  " + "-" * 78,
-    ]
-
-    # Accumulators for the summary row.
-    sum_max = sum_mean = sum_best_max = sum_best_mean = 0.0
-    n_valid = 0
-
-    # Cache progress snapshots so we don't drain the queue twice.
-    snapshots: list[dict] = []
-    for h in handles:
-        snapshots.append(h.progress)
-
-    for h, prog in zip(handles, snapshots):
-        gen = prog.get("generation", 0)
-        mx = prog.get("max_fitness", float("nan"))
-        mn = prog.get("mean_fitness", float("nan"))
-        bm = prog.get("best_max_fitness", float("nan"))
-        bmn = prog.get("best_mean_fitness", float("nan"))
-        status = "done" if not h.is_running else "running"
-        pct = 100 * gen / max_generations if max_generations else 0
-        bar_filled = int(pct / 10)
-        bar = "[" + "#" * bar_filled + "." * (10 - bar_filled) + "]"
-        lines.append(
-            f"  {h.population_id:>3}  {gen:>6}/{max_generations:<6}  "
-            f"{mx:>9.3f}  {mn:>9.3f}  {bm:>9.3f}  {bmn:>9.3f}  "
-            f"{status:<8}  {pct:5.1f}% {bar}"
-        )
-        if (
-            not math.isnan(mx)
-            and not math.isnan(mn)
-            and not math.isnan(bm)
-            and not math.isnan(bmn)
-        ):
-            sum_max += mx
-            sum_mean += mn
-            sum_best_max += bm
-            sum_best_mean += bmn
-            n_valid += 1
-
-    # Summary row.
-    lines.append("  " + "-" * 78)
-    total = total_populations if total_populations is not None else TOTAL_POPULATIONS
-    if completed_snapshots:
-        c_bm = [s.get("best_max_fitness", float("nan")) for s in completed_snapshots]
-        c_bmn = [s.get("best_mean_fitness", float("nan")) for s in completed_snapshots]
-        valid_bm = [v for v in c_bm if not math.isnan(v)]
-        valid_bmn = [v for v in c_bmn if not math.isnan(v)]
-        avg_c_bm = sum(valid_bm) / len(valid_bm) if valid_bm else float("nan")
-        avg_c_bmn = sum(valid_bmn) / len(valid_bmn) if valid_bmn else float("nan")
-        lines.append(
-            f"  {'':>3}  Completed: {len(completed_snapshots)}/{total}"
-            f"   avg best_max: {avg_c_bm:>9.3f}   avg best_mean: {avg_c_bmn:>9.3f}"
-        )
-    if n_valid:
-        avg_max = sum_max / n_valid
-        avg_mean = sum_mean / n_valid
-        avg_best_max = sum_best_max / n_valid
-        avg_best_mean = sum_best_mean / n_valid
-        lines.append(
-            f"  {'AVG':>3}  {'':>6} {'':6}  "
-            f"{avg_max:>9.3f}  {avg_mean:>9.3f}  {avg_best_max:>9.3f}  {avg_best_mean:>9.3f}  "
-            f"{'':8}"
-        )
-    else:
-        lines.append(f"  {'AVG':>3}  (no data yet)")
-    return lines
-
-
-def _print_progress(
-    handles: list[PopulationHandle],
-    max_generations: int,
-    elapsed_s: float,
-    *,
-    first: bool = False,
-    tty: bool,
-    prev_lines: int = 0,
-    completed_snapshots: list[dict] | None = None,
-    total_populations: int | None = None,
-) -> int:
-    """Render the progress table, overwriting previous output on a TTY.
-
-    Returns the number of lines printed (so the next call can erase them).
-    """
-    lines = _format_table(
-        handles,
-        max_generations,
-        elapsed_s,
-        completed_snapshots,
-        total_populations,
-    )
-    if tty and not first and prev_lines:
-        # Move cursor up to the start of the previous block and erase each line.
-        sys.stdout.write(_CURSOR_UP.format(prev_lines))
-        for _ in range(prev_lines):
-            sys.stdout.write(_ERASE_LINE + "\n")
-        sys.stdout.write(_CURSOR_UP.format(prev_lines))
-    for line in lines:
-        sys.stdout.write(line + "\n")
-    sys.stdout.flush()
-    return len(lines)
-
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -395,7 +248,6 @@ def run(
     restarts_per_gen = int(params["restarts_per_gen"])
     checkpoint_interval = int(params["checkpoint_interval"])
     poll_interval_s = float(params["poll_interval_s"])
-    tty = _is_tty()
 
     maze = Maze(
         name="MazeRunnerMaze",
@@ -413,38 +265,13 @@ def run(
         f"  Checkpoints → {base_dir.resolve()}\n"
     )
 
-    handles = launch_populations(
-        configs, max_generations=max_generations, base_dir=base_dir
-    )
     t0 = time.monotonic()
-
-    prev_lines = _print_progress(
-        handles, max_generations, elapsed_s=0.0, first=True, tty=tty
-    )
-
-    try:
-        while any(h.is_running for h in handles):
-            time.sleep(poll_interval_s)
-            prev_lines = _print_progress(
-                handles,
-                max_generations,
-                elapsed_s=time.monotonic() - t0,
-                first=False,
-                tty=tty,
-                prev_lines=prev_lines,
-            )
-    except BaseException:
-        stop_all(handles)
-        raise
-
-    # Final update after all processes have exited.
-    _print_progress(
-        handles,
-        max_generations,
-        elapsed_s=time.monotonic() - t0,
-        first=False,
-        tty=tty,
-        prev_lines=prev_lines,
+    handles = _run_batch(
+        configs,
+        max_generations=max_generations,
+        base_dir=base_dir,
+        poll_interval_s=poll_interval_s,
+        launch=launch_populations,
     )
 
     total_s = time.monotonic() - t0
@@ -498,7 +325,6 @@ def run_pool(
     population_size = int(params["population_size"])
     checkpoint_interval = int(params["checkpoint_interval"])
     poll_interval_s = float(params["poll_interval_s"])
-    tty = _is_tty()
 
     maze = Maze(
         name="MazeRunnerMaze",
@@ -520,84 +346,16 @@ def run_pool(
         f"  Run ID: {run_id}   Checkpoints → {base_dir.resolve()}\n"
     )
 
-    active: list[PopulationHandle] = []
-    next_id: int = 0
-    completed_snapshots: list[dict] = []
-
-    # Initial fill — launch min(max_parallel, total_populations) populations.
-    initial = min(max_parallel, total_populations)
-    for _ in range(initial):
-        config = _build_config(next_id, maze, params)
-        [handle] = launch_populations(
-            [config],
-            max_generations=max_generations,
-            base_dir=base_dir,
-            run_id=run_id,
-            start_pop_id=next_id,
-        )
-        active.append(handle)
-        next_id += 1
-
     t0 = time.monotonic()
-    prev_lines = _print_progress(
-        active,
-        max_generations,
-        elapsed_s=0.0,
-        first=True,
-        tty=tty,
-        completed_snapshots=completed_snapshots,
+    completed_snapshots, run_id, run_dir = _run_population_pool(
         total_populations=total_populations,
-    )
-
-    try:
-        while active:
-            time.sleep(poll_interval_s)
-
-            still_running: list[PopulationHandle] = []
-            for h in active:
-                if h.is_running:
-                    still_running.append(h)
-                else:
-                    # Drain the final progress snapshot before discarding the handle.
-                    completed_snapshots.append(h.progress)
-                    # Backfill the freed slot if the quota is not yet met.
-                    if next_id < total_populations:
-                        config = _build_config(next_id, maze, params)
-                        [new_handle] = launch_populations(
-                            [config],
-                            max_generations=max_generations,
-                            base_dir=base_dir,
-                            run_id=run_id,
-                            start_pop_id=next_id,
-                        )
-                        still_running.append(new_handle)
-                        next_id += 1
-
-            active = still_running
-            prev_lines = _print_progress(
-                active,
-                max_generations,
-                elapsed_s=time.monotonic() - t0,
-                first=False,
-                tty=tty,
-                prev_lines=prev_lines,
-                completed_snapshots=completed_snapshots,
-                total_populations=total_populations,
-            )
-    except BaseException:
-        stop_all(active)
-        raise
-
-    # Final progress update after the last population finishes.
-    _print_progress(
-        active,
-        max_generations,
-        elapsed_s=time.monotonic() - t0,
-        first=False,
-        tty=tty,
-        prev_lines=prev_lines,
-        completed_snapshots=completed_snapshots,
-        total_populations=total_populations,
+        max_parallel=max_parallel,
+        max_generations=max_generations,
+        base_dir=base_dir,
+        config_factory=lambda pop_id: _build_config(pop_id, maze, params),
+        poll_interval_s=poll_interval_s,
+        run_id=run_id,
+        launch=launch_populations,
     )
 
     total_s = time.monotonic() - t0
@@ -606,7 +364,6 @@ def run_pool(
         f"\nAll {total_populations} populations finished in {total_s:.1f}s "
         f"({avg_s:.1f}s avg per population)."
     )
-    run_dir = base_dir / run_id
     return completed_snapshots, run_id, run_dir
 
 
@@ -650,56 +407,15 @@ def run_experiment(
         a completed experiment with the same name has already been recorded.
     """
     params = _resolve_experiment_params(params)
-    run_id = _generate_run_id()
-    experiment_id: int | None = None
-
-    try:
-        with ExperimentStore(database_url) as store:
-            claim = store.claim_experiment(
-                name=name,
-                description=description,
-                run_id=run_id,
-                params=params,
-            )
-            experiment_id = claim.experiment_id
-            if claim.already_completed:
-                print(
-                    f"\nExperiment '{name}' already completed → id={experiment_id}; "
-                    "skipping run."
-                )
-                return experiment_id
-            store.mark_experiment_running(experiment_id)
-
-        snapshots, run_id, run_dir = run_pool(
-            base_dir=base_dir,
-            run_id=run_id,
-            params=params,
-        )
-
-        with ExperimentStore(database_url) as store:
-            n_rows = store.ingest_run(experiment_id, run_dir)
-            store.mark_experiment_completed(experiment_id)
-
-    except BaseException as exc:
-        if experiment_id is not None:
-            try:
-                with ExperimentStore(database_url) as store:
-                    store.mark_experiment_failed(
-                        experiment_id, f"{type(exc).__name__}: {exc}"
-                    )
-            except Exception as mark_error:
-                print(
-                    f"\nFailed to mark experiment '{name}' failed: {mark_error}",
-                    file=sys.stderr,
-                )
-        raise
-
-    print(
-        f"\nExperiment '{name}' saved → id={experiment_id}  "
-        f"({n_rows} generation-stat rows across {len(snapshots)} populations)"
-        "\n  DB: PostgreSQL"
+    return _run_tracked_experiment(
+        name=name,
+        params=params,
+        description=description,
+        base_dir=base_dir,
+        database_url=database_url,
+        pool_runner=run_pool,
+        store_factory=ExperimentStore,
     )
-    return experiment_id
 
 
 # ---------------------------------------------------------------------------

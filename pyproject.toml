@@ -18,6 +18,8 @@ dependencies = [
     "plotly>=5.0",
     "pandas>=2.0",
     "nbformat>=5.0",
+    "matplotlib>=3.7",
+    "datasets>=2.0",
 ]
 
 [project.scripts]

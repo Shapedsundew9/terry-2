@@ -1,23 +1,40 @@
-from random import randrange
+from __future__ import annotations
 
-from datasets import load_dataset
+from functools import lru_cache
+from signal import SIGINT, signal
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from arc3_agi.automaton import AutomatonISBase
+from arc3_agi.checkpoint import CheckpointConfig
 from arc3_agi.environment import ByteEnv
+from arc3_agi.fingerprint import FingerprintConfig
 from arc3_agi.genetic_code import GeneticCodeTsetlin
 from arc3_agi.population import Population
 
-# Option 1: Smallest general English text (~4.5 MB)
-wikitext = load_dataset("Salesforce/wikitext", "wikitext-2-raw-v1")
-wikienv = ByteEnv(
-    name="WikiEnv",
-    array=[
-        wikitext["train"][i]["text"]
-        for i in range(len(wikitext["train"]))
-        if wikitext["train"][i]["text"]
-    ],  # Use only non-empty strings
-    encoding="utf-8",
-)
+if TYPE_CHECKING:
+    from arc3_agi.population_rendering import PopulationGenerationSnapshot
+
+
+TICKS_PER_GENERATION = 1000
+
+
+class PopulationCharts(Protocol):
+    def update(
+        self,
+        snapshot: PopulationGenerationSnapshot,
+        duration_s: float | None,
+    ) -> None: ...
+
+
+@lru_cache(maxsize=1)
+def load_wikitext_environment() -> ByteEnv:
+    """Load WikiText 2 on first use and return it as a byte environment."""
+    from datasets import load_dataset
+
+    wikitext = load_dataset("Salesforce/wikitext", "wikitext-2-raw-v1")
+    train = cast(Any, wikitext)["train"]
+    texts = [text for text in train["text"] if text]
+    return ByteEnv(name="WikiEnv", array=texts, encoding="utf-8")
 
 
 class WikiAutomaton(AutomatonISBase):
@@ -56,7 +73,7 @@ class WikiAutomaton(AutomatonISBase):
     def reset(self) -> None:
         """Reset the automaton's state and coordinates."""
         super().reset()
-        self.coords = [randrange(len(self.environment.get())), 0]
+        self.coords = [self.rng.randrange(len(self.environment.get())), 0]
         self.remaining_bytes = 0  # Reset remaining bytes to read.
         self.right = 0
         self.total = 0
@@ -64,20 +81,22 @@ class WikiAutomaton(AutomatonISBase):
 
     def tick(self, **kwargs) -> int:
         """Perform a single tick of the automaton."""
+        texts = self.environment.get()
         if not self.remaining_bytes:
-            b = self.environment.get()
-            if self.coords[0] < len(b) - 1:
+            if self.coords[0] < len(texts) - 1:
                 self.coords[0] += 1  # Move to the next bytes object in the environment.
             else:
                 self.coords[0] = 0
             self.coords[1] = 0  # Reset the byte index to 0 for the new bytes object.
-            self.remaining_bytes = len(b[self.coords[0]])
+            self.remaining_bytes = len(texts[self.coords[0]])
         prediction = super().tick(**kwargs)
         self.total += 1  # Increment the total number of predictions.
         self.remaining_bytes -= 1  # Decrement the remaining bytes to read.
         self.coords[1] += 1  # Move to the next byte in the current bytes object.
         actual = (
-            0 if not self.remaining_bytes else self.environment.get_local(self.coords)
+            0
+            if not self.remaining_bytes
+            else texts[self.coords[0]][self.coords[1]]
         )
         if prediction == actual:
             self.right += 1  # Increment the count of correct predictions.
@@ -87,22 +106,94 @@ class WikiAutomaton(AutomatonISBase):
 
 class WikiPopulation(Population):
     def __init__(self, **kwargs) -> None:
+        environment = kwargs.get("environment")
+        if environment is None:
+            environment = load_wikitext_environment()
         super().__init__(
             AutomatonClass=kwargs.get("automaton_class", WikiAutomaton),
-            environment=kwargs.get("environment", wikienv),
+            environment=environment,
             size=kwargs.get("size", 100),
             seed=kwargs.get("seed", None),
             automaton_params=kwargs.get("automaton_params", None),
             checkpoint_config=kwargs.get("checkpoint_config", None),
+            fingerprint_config=kwargs.get("fingerprint_config", None),
         )
         assert isinstance(
             self.environment, ByteEnv
         ), "WikiPopulation requires a ByteEnv environment."
 
 
+def run_charted_generation(
+    population: Population,
+    charts: PopulationCharts,
+    ticks_per_generation: int = TICKS_PER_GENERATION,
+) -> PopulationGenerationSnapshot:
+    """Evaluate, evolve, and render one population generation."""
+    from arc3_agi.population_rendering import PopulationGenerationSnapshot
+
+    population.run_generation(ticks_per_generation)
+    snapshot = PopulationGenerationSnapshot.capture(population.automata)
+    population.evolve()
+    charts.update(snapshot, population.fitness_history[-1].get("duration_s"))
+    return snapshot
+
+
+def run_live() -> None:
+    """Evolve WikiText predictors and display live population charts."""
+    import traceback
+
+    import matplotlib
+
+    matplotlib.use("webagg")
+    import matplotlib.pyplot as plt
+
+    from arc3_agi.population_rendering import PopulationChartSuite
+
+    environment = load_wikitext_environment()
+    charts = PopulationChartSuite()
+    population = WikiPopulation(
+        environment=environment,
+        checkpoint_config=CheckpointConfig(enabled=False),
+        fingerprint_config=FingerprintConfig(bits=4, tournament_k=4),
+    )
+    stopped = False
+
+    def stop() -> None:
+        nonlocal stopped
+        if stopped:
+            return
+        stopped = True
+        timer.stop()
+        charts.close()
+
+    def simulation_step() -> None:
+        if stopped:
+            return
+        try:
+            run_charted_generation(population, charts)
+        except Exception:
+            traceback.print_exc()
+            stop()
+
+    timer = charts.canvas.new_timer(interval=1)
+    timer.add_callback(simulation_step)
+    timer.start()
+
+    def handle_close(event) -> None:
+        stop()
+
+    def handle_sigint(sig, frame) -> None:
+        stop()
+
+    for figure in charts.figures:
+        figure.canvas.mpl_connect("close_event", handle_close)
+    signal(SIGINT, handle_sigint)
+
+    try:
+        plt.show()
+    finally:
+        stop()
+
+
 if __name__ == "__main__":
-    pop = WikiPopulation()
-    for _ in range(10):
-        for _ in range(1000):
-            pop.tick()
-        pop.evolve()
+    run_live()

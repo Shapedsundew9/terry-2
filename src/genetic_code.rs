@@ -49,11 +49,11 @@ pub enum GeneticCode {
 }
 
 impl GeneticCode {
-    pub fn from_dict_entries(entries: Vec<(u32, u8)>, output_bits: u8, seed: Option<u64>) -> Self {
+    pub fn from_dict_entries(entries: Vec<(u32, u16)>, output_bits: u8, seed: Option<u64>) -> Self {
         Self::Dict(GeneticCodeDict::from_entries(entries, output_bits, seed))
     }
 
-    pub fn from_list_values(values: Vec<u8>, output_bits: u8, seed: Option<u64>) -> Self {
+    pub fn from_list_values(values: Vec<u16>, output_bits: u8, seed: Option<u64>) -> Self {
         Self::List(GeneticCodeList::from_values(values, output_bits, seed))
     }
 
@@ -81,7 +81,7 @@ impl GeneticCode {
     }
 
     #[inline]
-    pub fn get(&mut self, key: u32) -> u8 {
+    pub fn get(&mut self, key: u32) -> u16 {
         match self {
             Self::Dict(code) => code.get(key),
             Self::List(code) => code.get(key),
@@ -144,7 +144,7 @@ impl GeneticCode {
         }
     }
 
-    pub fn entries(&self) -> Vec<(u32, u8)> {
+    pub fn entries(&self) -> Vec<(u32, u16)> {
         match self {
             Self::Dict(code) => code.entries(),
             Self::List(code) => code.entries(),
@@ -164,7 +164,7 @@ impl GeneticCode {
 // GeneticCodeDict  (primary — sparse HashMap with lazy fill)
 // ---------------------------------------------------------------------------
 
-/// Sparse genetic code backed by a `HashMap<u32, u8>`.
+/// Sparse genetic code backed by a `HashMap<u32, u16>`.
 ///
 /// Keys are generated on first access (lazy fill) using a seeded RNG so that
 /// unseen state/environment combinations produce a random (but deterministic)
@@ -172,11 +172,11 @@ impl GeneticCode {
 /// exactly, including the on-miss insertion semantics.
 #[derive(Clone)]
 pub struct GeneticCodeDict {
-    map: HashMap<u32, u8>,
+    map: HashMap<u32, u16>,
     /// Number of bits in the output value (`state_bits + resp_bits`).
     output_bits: u8,
     /// Mask derived from `output_bits`.
-    output_mask: u8,
+    output_mask: u16,
     /// Optional seed stored for checkpoint round-trips.
     seed: Option<u64>,
     /// RNG used for lazy-fill value generation.
@@ -189,7 +189,7 @@ impl GeneticCodeDict {
         GeneticCodeDict {
             map: HashMap::new(),
             output_bits,
-            output_mask: ((1u16 << output_bits) - 1) as u8,
+            output_mask: packed_output_mask(output_bits),
             seed: Some(seed),
             cold_rng: Box::new(StdRng::seed_from_u64(seed)),
         }
@@ -197,13 +197,13 @@ impl GeneticCodeDict {
 
     /// Reconstruct from a serialised key/value pair (for checkpoint loading).
     #[allow(dead_code)]
-    pub fn from_entries(entries: Vec<(u32, u8)>, output_bits: u8, seed: Option<u64>) -> Self {
-        let map: HashMap<u32, u8> = entries.into_iter().collect();
+    pub fn from_entries(entries: Vec<(u32, u16)>, output_bits: u8, seed: Option<u64>) -> Self {
+        let map: HashMap<u32, u16> = entries.into_iter().collect();
         let cold_rng = Box::new(StdRng::seed_from_u64(seed.unwrap_or(0)));
         GeneticCodeDict {
             map,
             output_bits,
-            output_mask: ((1u16 << output_bits) - 1) as u8,
+            output_mask: packed_output_mask(output_bits),
             seed,
             cold_rng,
         }
@@ -211,17 +211,17 @@ impl GeneticCodeDict {
 }
 
 impl GeneticCodeDict {
-    fn get(&mut self, key: u32) -> u8 {
+    fn get(&mut self, key: u32) -> u16 {
         if let Some(&v) = self.map.get(&key) {
             return v;
         }
         // Lazy fill: generate a random output and cache it.
-        let v = (self.cold_rng.next_u32() as u8) & self.output_mask;
+        let v = (self.cold_rng.next_u32() as u16) & self.output_mask;
         self.map.insert(key, v);
         v
     }
 
-    fn entries(&self) -> Vec<(u32, u8)> {
+    fn entries(&self) -> Vec<(u32, u16)> {
         self.map.iter().map(|(&k, &v)| (k, v)).collect()
     }
 
@@ -251,7 +251,7 @@ impl GeneticCodeDict {
             while i < n {
                 let k = keys[i];
                 let bit = (rng.next_u32() as u8) % self.output_bits;
-                *child_map.get_mut(&k).unwrap() ^= 1u8 << bit;
+                *child_map.get_mut(&k).unwrap() ^= 1u16 << bit;
                 let u2: f64 = (rng.next_u64() >> 11) as f64 * (1.0 / (1u64 << 53) as f64);
                 i = i
                     .saturating_add(1)
@@ -381,8 +381,8 @@ impl GeneticCodeTsetlin {
         num_clauses: usize,
         input_bits: u8,
     ) -> Result<(), String> {
-        if !(1..=8).contains(&output_bits) {
-            return Err("Tsetlin output_bits must be between 1 and 8".into());
+        if !(1..=16).contains(&output_bits) {
+            return Err("Tsetlin output_bits must be between 1 and 16".into());
         }
         if num_clauses == 0 {
             return Err("Tsetlin num_clauses must be at least 1".into());
@@ -397,8 +397,8 @@ impl GeneticCodeTsetlin {
     }
 
     #[inline]
-    pub fn evaluate(&self, key: u64) -> u8 {
-        let mut output = 0u8;
+    pub fn evaluate(&self, key: u64) -> u16 {
+        let mut output = 0u16;
         for response_bit in 0..self.output_bits as usize {
             let start = response_bit * self.num_clauses;
             let end = start + self.num_clauses;
@@ -409,7 +409,7 @@ impl GeneticCodeTsetlin {
                 }
             }
             if votes as f64 >= self.threshold {
-                output |= 1u8 << response_bit;
+                output |= 1u16 << response_bit;
             }
         }
         output
@@ -522,7 +522,7 @@ fn random_index(rng: &mut dyn RngCore, upper: usize) -> usize {
 // GeneticCodeList  (secondary — dense Vec for contiguous key spaces)
 // ---------------------------------------------------------------------------
 
-/// Dense genetic code backed by a `Vec<u8>`.
+/// Dense genetic code backed by a `Vec<u16>`.
 ///
 /// All entries are pre-allocated and initialised with cold-start random
 /// values.  Direct `O(1)` index access; no lazy fill needed.  Mirrors
@@ -530,7 +530,7 @@ fn random_index(rng: &mut dyn RngCore, upper: usize) -> usize {
 #[allow(dead_code)]
 #[derive(Clone)]
 pub struct GeneticCodeList {
-    code: Vec<u8>,
+    code: Vec<u16>,
     output_bits: u8,
     seed: Option<u64>,
 }
@@ -540,8 +540,8 @@ impl GeneticCodeList {
     #[allow(dead_code)]
     pub fn new(size: usize, output_bits: u8, seed: u64) -> Self {
         let mut rng = StdRng::seed_from_u64(seed);
-        let mask = ((1u16 << output_bits) - 1) as u8;
-        let code: Vec<u8> = (0..size).map(|_| (rng.next_u32() as u8) & mask).collect();
+        let mask = packed_output_mask(output_bits);
+        let code: Vec<u16> = (0..size).map(|_| (rng.next_u32() as u16) & mask).collect();
         GeneticCodeList {
             code,
             output_bits,
@@ -551,7 +551,7 @@ impl GeneticCodeList {
 
     /// Reconstruct from a serialised value list (for checkpoint loading).
     #[allow(dead_code)]
-    pub fn from_values(values: Vec<u8>, output_bits: u8, seed: Option<u64>) -> Self {
+    pub fn from_values(values: Vec<u16>, output_bits: u8, seed: Option<u64>) -> Self {
         GeneticCodeList {
             code: values,
             output_bits,
@@ -561,11 +561,11 @@ impl GeneticCodeList {
 }
 
 impl GeneticCodeList {
-    fn get(&mut self, key: u32) -> u8 {
+    fn get(&mut self, key: u32) -> u16 {
         self.code[key as usize]
     }
 
-    fn entries(&self) -> Vec<(u32, u8)> {
+    fn entries(&self) -> Vec<(u32, u16)> {
         self.code
             .iter()
             .cloned()
@@ -576,7 +576,7 @@ impl GeneticCodeList {
 
     fn crossover_with_rng(&self, other: &Self, mutation_rate: f64, rng: &mut dyn RngCore) -> Self {
         let n = self.code.len();
-        let mut child: Vec<u8> = Vec::with_capacity(n);
+        let mut child: Vec<u16> = Vec::with_capacity(n);
 
         for i in 0..n {
             let self_val = self.code[i];
@@ -596,7 +596,7 @@ impl GeneticCodeList {
             let mut i = (u.ln() * inv_log) as usize;
             while i < n {
                 let bit = (rng.next_u32() as u8) % self.output_bits;
-                child[i] ^= 1u8 << bit;
+                child[i] ^= 1u16 << bit;
                 let u2: f64 = (rng.next_u64() >> 11) as f64 * (1.0 / (1u64 << 53) as f64);
                 i = i
                     .saturating_add(1)
@@ -611,6 +611,14 @@ impl GeneticCodeList {
             seed: Some(child_seed),
         }
     }
+}
+
+fn packed_output_mask(output_bits: u8) -> u16 {
+    assert!(
+        (1..=16).contains(&output_bits),
+        "output_bits must be between 1 and 16"
+    );
+    u16::MAX >> (16 - output_bits)
 }
 
 #[cfg(test)]
@@ -631,6 +639,14 @@ mod tests {
 
         assert_eq!(code.evaluate(0b0001), 0b01);
         assert_eq!(code.evaluate(0b0010), 0b10);
+    }
+
+    #[test]
+    fn tsetlin_supports_16_output_bits() {
+        let code =
+            GeneticCodeTsetlin::from_masks(vec![0; 16], vec![0; 16], 16, 1, 24, Some(7)).unwrap();
+
+        assert_eq!(code.evaluate(0), u16::MAX);
     }
 
     #[test]

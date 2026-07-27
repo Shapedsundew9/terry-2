@@ -6,3 +6,5 @@ pub mod genetic_code;
 pub mod maze;
 pub mod population;
 pub mod runner;
+pub mod wiki;
+pub mod wiki_runner;

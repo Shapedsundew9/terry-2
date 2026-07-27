@@ -23,6 +23,27 @@ fn benchmark_tsetlin(c: &mut Criterion) {
             )
         });
     });
+
+    let wiki_code = GeneticCodeTsetlin::new(16, 16, 24, 45).unwrap();
+    c.bench_function("tsetlin_lookup_16x16_wiki", |b| {
+        let mut input = 0u64;
+        b.iter(|| {
+            input = input.wrapping_add(0x9e37) & ((1 << 24) - 1);
+            black_box(wiki_code.evaluate(black_box(input)))
+        });
+    });
+
+    let wiki_other = GeneticCodeTsetlin::new(16, 16, 24, 46).unwrap();
+    c.bench_function("tsetlin_crossover_16x16_wiki", |b| {
+        let mut rng = StdRng::seed_from_u64(47);
+        b.iter(|| {
+            black_box(
+                wiki_code
+                    .crossover_with_rng(&wiki_other, black_box(0.01), &mut rng)
+                    .unwrap(),
+            )
+        });
+    });
 }
 
 criterion_group!(benches, benchmark_tsetlin);

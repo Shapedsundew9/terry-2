@@ -6,9 +6,11 @@
 /// bulk-upserts into `generation_stats`.
 use std::path::Path;
 
+use chrono::Utc;
 use postgres::binary_copy::BinaryCopyInWriter;
 use postgres::types::Type;
 use postgres::{Client, NoTls};
+use rand::RngCore;
 use serde_json::Value;
 
 // Identical to Python's _SCHEMA_SQL (idempotent — safe to run on every start).
@@ -68,6 +70,85 @@ pub fn resolve_database_url(explicit: Option<&str>) -> String {
         return url;
     }
     DEFAULT_DATABASE_URL.to_string()
+}
+
+pub fn generate_run_id() -> String {
+    let timestamp = Utc::now().format("%Y%m%dT%H%M%S");
+    let suffix = rand::rng().next_u32() & 0x00ff_ffff;
+    format!("{timestamp}_{suffix:06x}")
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn run_tracked_experiment<Run>(
+    name: &str,
+    description: &str,
+    params: &Value,
+    base_dir: &Path,
+    database_url: Option<&str>,
+    run: Run,
+) -> Result<(), Box<dyn std::error::Error>>
+where
+    Run: FnOnce(&str, &Path) -> Result<(), Box<dyn std::error::Error>>,
+{
+    let database_url = resolve_database_url(database_url);
+    let run_id = generate_run_id();
+    let run_dir = base_dir.join(&run_id);
+    let mut store = ExperimentStore::connect(&database_url)?;
+    let (experiment_id, already_completed) =
+        store.claim_experiment(name, description, &run_id, params)?;
+    if already_completed {
+        println!("\nExperiment '{name}' already completed -> id={experiment_id}; skipping.");
+        return Ok(());
+    }
+
+    store.mark_running(experiment_id)?;
+    let interrupt_database_url = database_url.clone();
+    ctrlc::set_handler(move || {
+        eprintln!("\nCtrl-C received; marking experiment {experiment_id} as failed.");
+        match ExperimentStore::connect(&interrupt_database_url) {
+            Ok(mut interrupt_store) => {
+                if let Err(error) =
+                    interrupt_store.mark_failed(experiment_id, "interrupted by Ctrl-C")
+                {
+                    eprintln!("Failed to update experiment {experiment_id}: {error}");
+                }
+            }
+            Err(error) => eprintln!("Failed to connect to the experiment database: {error}"),
+        }
+        std::process::exit(130);
+    })?;
+    drop(store);
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(&run_id, &run_dir)));
+    match result {
+        Ok(Ok(())) => {
+            let mut store = ExperimentStore::connect(&database_url)?;
+            let rows = store.ingest_run(experiment_id, &run_dir)?;
+            store.mark_completed(experiment_id)?;
+            println!(
+                "\nExperiment '{name}' done -> id={experiment_id}  ({rows} generation-stat rows)"
+            );
+            Ok(())
+        }
+        Ok(Err(error)) => {
+            let message = error.to_string();
+            let mut store = ExperimentStore::connect(&database_url)?;
+            store.mark_failed(experiment_id, &message)?;
+            Err(error)
+        }
+        Err(payload) => {
+            let message = if let Some(message) = payload.downcast_ref::<String>() {
+                message.clone()
+            } else if let Some(message) = payload.downcast_ref::<&str>() {
+                message.to_string()
+            } else {
+                "unknown panic".into()
+            };
+            let mut store = ExperimentStore::connect(&database_url)?;
+            store.mark_failed(experiment_id, &message)?;
+            Err(format!("pool panicked: {message}").into())
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

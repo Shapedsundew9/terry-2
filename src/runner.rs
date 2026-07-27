@@ -17,7 +17,7 @@ use serde_json::json;
 use crate::checkpoint::CheckpointConfig;
 use crate::checkpoint::{load_population, ResumeConfig};
 use crate::maze::Maze;
-use crate::population::{GenerationStats, PopConfig, Population};
+use crate::population::{GenerationStats, PopConfig, PopulationAutomaton, PopulationCore};
 
 /// Parameters for the pool runner.
 #[derive(Clone, Debug)]
@@ -59,28 +59,57 @@ pub fn run_one_population(
     run_dir: &Path,
     cfg: &RunnerConfig,
 ) -> Vec<GenerationStats> {
+    run_one_population_core::<crate::automaton::MazeAutomaton, _>(
+        pop_id,
+        maze.as_ref(),
+        run_dir,
+        &cfg.pop_config,
+        cfg.base_population_seed,
+        cfg.max_generations,
+        &cfg.checkpoint,
+        crate::checkpoint::save_population,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_one_population_core<A, SaveCheckpoint>(
+    pop_id: usize,
+    environment: &A::Environment,
+    run_dir: &Path,
+    pop_config: &PopConfig,
+    base_population_seed: u64,
+    max_generations: usize,
+    checkpoint: &CheckpointConfig,
+    save_checkpoint: SaveCheckpoint,
+) -> Vec<GenerationStats>
+where
+    A: PopulationAutomaton,
+    SaveCheckpoint: Fn(&PopulationCore<A>, &A::Environment, &Path) -> std::io::Result<()>,
+{
     let pop_dir = run_dir.join(format!("pop_{pop_id}"));
     std::fs::create_dir_all(&pop_dir).expect("create pop dir");
 
-    let seed = cfg.base_population_seed + pop_id as u64;
-    let mut population = Population::new(&maze, cfg.pop_config.clone(), seed);
+    let seed = base_population_seed + pop_id as u64;
+    let mut population = PopulationCore::<A>::new(environment, pop_config.clone(), seed);
 
-    let ckpt_cfg = &cfg.checkpoint;
-    let mut history: Vec<GenerationStats> = Vec::with_capacity(cfg.max_generations);
+    let mut history: Vec<GenerationStats> = Vec::with_capacity(max_generations);
 
     let t0 = Instant::now();
-    for gen in 0..cfg.max_generations {
-        population.run_generation(&maze);
-        let stats = population.evolve(&maze);
+    for generation in 0..max_generations {
+        population.run_generation(environment);
+        let stats = population.evolve(environment);
 
         // Optional checkpoint.
-        if ckpt_cfg.enabled
-            && ckpt_cfg.generation_interval > 0
-            && (gen + 1) % ckpt_cfg.generation_interval == 0
+        if checkpoint.enabled
+            && checkpoint.generation_interval > 0
+            && (generation + 1) % checkpoint.generation_interval == 0
         {
-            let stem = pop_dir.join(format!("gen_{:06}", gen + 1));
-            if let Err(e) = crate::checkpoint::save_population(&population, &maze, &stem) {
-                eprintln!("[pop {pop_id}] checkpoint error at gen {}: {e}", gen + 1);
+            let stem = pop_dir.join(format!("gen_{:06}", generation + 1));
+            if let Err(error) = save_checkpoint(&population, environment, &stem) {
+                eprintln!(
+                    "[pop {pop_id}] checkpoint error at gen {}: {error}",
+                    generation + 1
+                );
             }
         }
 
@@ -91,7 +120,7 @@ pub fn run_one_population(
     eprintln!(
         "[pop {pop_id}] done: {} gens in {elapsed:.1}s  \
          best_max={:.3}",
-        cfg.max_generations,
+        max_generations,
         history
             .iter()
             .map(|s| s.max_fitness)
@@ -105,7 +134,7 @@ pub fn run_one_population(
 }
 
 /// Serialise `fitness_history.json` matching Python's `_worker_fn` output.
-fn write_fitness_history(pop_dir: &Path, pop_id: usize, history: &[GenerationStats]) {
+pub(crate) fn write_fitness_history(pop_dir: &Path, pop_id: usize, history: &[GenerationStats]) {
     let records: Vec<serde_json::Value> = history
         .iter()
         .map(|s| {
@@ -212,17 +241,59 @@ pub fn run_pool(run_dir: &Path, cfg: &RunnerConfig) -> Vec<Vec<GenerationStats>>
         cfg.pop_config.ticks_per_restart,
     );
 
+    run_population_pool::<crate::automaton::MazeAutomaton, _>(
+        run_dir,
+        maze,
+        cfg.total_populations,
+        cfg.max_parallel,
+        cfg.max_generations,
+        &cfg.pop_config,
+        cfg.base_population_seed,
+        &cfg.checkpoint,
+        crate::checkpoint::save_population,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_population_pool<A, SaveCheckpoint>(
+    run_dir: &Path,
+    environment: Arc<A::Environment>,
+    total_populations: usize,
+    max_parallel: usize,
+    max_generations: usize,
+    pop_config: &PopConfig,
+    base_population_seed: u64,
+    checkpoint: &CheckpointConfig,
+    save_checkpoint: SaveCheckpoint,
+) -> Vec<Vec<GenerationStats>>
+where
+    A: PopulationAutomaton + Send,
+    A::Environment: Send + Sync,
+    SaveCheckpoint:
+        Fn(&PopulationCore<A>, &A::Environment, &Path) -> std::io::Result<()> + Send + Sync,
+{
+    std::fs::create_dir_all(run_dir).expect("create run dir");
+
     let pool = ThreadPoolBuilder::new()
-        .num_threads(cfg.max_parallel)
+        .num_threads(max_parallel)
         .build()
         .expect("build rayon thread pool");
 
     let results: Vec<(usize, Vec<GenerationStats>)> = pool.install(|| {
         use rayon::prelude::*;
-        (0..cfg.total_populations)
+        (0..total_populations)
             .into_par_iter()
             .map(|pop_id| {
-                let history = run_one_population(pop_id, Arc::clone(&maze), run_dir, cfg);
+                let history = run_one_population_core::<A, _>(
+                    pop_id,
+                    environment.as_ref(),
+                    run_dir,
+                    pop_config,
+                    base_population_seed,
+                    max_generations,
+                    checkpoint,
+                    &save_checkpoint,
+                );
                 (pop_id, history)
             })
             .collect()
@@ -238,6 +309,7 @@ pub fn run_pool(run_dir: &Path, cfg: &RunnerConfig) -> Vec<Vec<GenerationStats>>
 mod tests {
     use super::*;
     use crate::genetic_code::GeneticCodeConfig;
+    use crate::population::Population;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn test_directory(label: &str) -> std::path::PathBuf {

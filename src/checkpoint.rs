@@ -22,6 +22,7 @@ use crate::fingerprint::{FingerprintConfig, SelectionFingerprint};
 use crate::genetic_code::{GeneticCode, GeneticCodeConfig, GeneticCodeKind, GeneticCodeTsetlin};
 use crate::maze::Maze;
 use crate::population::{GenerationStats, PopConfig, Population};
+use crate::wiki::{WikiAutomaton, WikiEnvironment, WikiPopulation};
 
 /// Checkpoint configuration.
 #[derive(Clone, Debug, Default)]
@@ -64,6 +65,21 @@ pub fn save_population(population: &Population, maze: &Maze, stem: &Path) -> io:
     Ok(())
 }
 
+pub fn save_wiki_population(
+    population: &WikiPopulation,
+    environment: &WikiEnvironment,
+    stem: &Path,
+) -> io::Result<()> {
+    let toml_path = stem.with_extension("toml");
+    let npz_path = stem.with_extension("npz");
+
+    let toml_doc = build_wiki_toml(population, environment);
+    let toml_str = toml::to_string(&toml_doc).map_err(|e| io::Error::other(e.to_string()))?;
+    std::fs::write(&toml_path, toml_str.as_bytes())?;
+    std::fs::write(&npz_path, build_wiki_npz(population)?)?;
+    Ok(())
+}
+
 #[derive(Clone, Debug)]
 pub struct ResumeConfig {
     pub ticks_per_restart: usize,
@@ -79,7 +95,10 @@ pub struct CheckpointSummary {
     pub population_size: usize,
     pub state_bits: u8,
     pub code_type: String,
+    pub tsetlin_clauses: Option<usize>,
+    pub environment_class: String,
     pub environment_name: String,
+    pub automaton_class: String,
     pub fingerprint_enabled: bool,
 }
 
@@ -103,7 +122,13 @@ pub fn inspect_checkpoint(stem: &Path) -> Result<CheckpointSummary, Box<dyn std:
         population_size: automata.len(),
         state_bits: u8_value(first, "state_bits")?,
         code_type: string_value(genetic_code, "type")?.to_string(),
+        tsetlin_clauses: genetic_code
+            .get("num_clauses")
+            .map(|_| usize_value(genetic_code, "num_clauses"))
+            .transpose()?,
+        environment_class: string_value(environment, "class")?.to_string(),
         environment_name: string_value(environment, "name")?.to_string(),
+        automaton_class: string_value(meta, "automaton_class")?.to_string(),
         fingerprint_enabled: root.contains_key("fingerprint_config"),
     })
 }
@@ -250,8 +275,8 @@ pub fn load_population(
                     .map(|(&key, &value)| {
                         let key = u32::try_from(key)
                             .map_err(|_| invalid_data("Dict checkpoint key is outside u32"))?;
-                        let value = u8::try_from(value)
-                            .map_err(|_| invalid_data("Dict checkpoint value is outside u8"))?;
+                        let value = u16::try_from(value)
+                            .map_err(|_| invalid_data("Dict checkpoint value is outside u16"))?;
                         Ok((key, value))
                     })
                     .collect::<Result<Vec<_>, io::Error>>()?;
@@ -264,8 +289,8 @@ pub fn load_population(
                 let values = values
                     .iter()
                     .map(|&value| {
-                        u8::try_from(value)
-                            .map_err(|_| invalid_data("List checkpoint value is outside u8"))
+                        u16::try_from(value)
+                            .map_err(|_| invalid_data("List checkpoint value is outside u16"))
                     })
                     .collect::<Result<Vec<_>, _>>()?;
                 GeneticCode::from_list_values(values, output_bits, seed)
@@ -377,6 +402,222 @@ pub fn load_population(
     ))
 }
 
+pub fn load_wiki_population(
+    stem: &Path,
+    environment: &WikiEnvironment,
+    resume: &ResumeConfig,
+) -> Result<WikiPopulation, Box<dyn std::error::Error>> {
+    if !resume.mutation_rate.is_finite() || !(0.0..=1.0).contains(&resume.mutation_rate) {
+        return Err(invalid_data("mutation_rate must be between 0 and 1").into());
+    }
+    let stem = stem.with_extension("");
+    let document: Value = toml::from_str(&std::fs::read_to_string(stem.with_extension("toml"))?)?;
+    let root = value_table(&document, "checkpoint root")?;
+    let meta = child_table(root, "meta")?;
+    if string_value(meta, "class")? != "Population"
+        || integer_value(meta, "schema_version")? != 1
+        || string_value(meta, "automaton_class")? != "WikiAutomaton"
+    {
+        return Err(invalid_data("checkpoint is not a schema-v1 Wiki population").into());
+    }
+    let environment_meta = child_table(root, "environment")?;
+    if string_value(environment_meta, "class")? != "ByteEnv"
+        || string_value(environment_meta, "name")? != environment.name
+    {
+        return Err(invalid_data(format!(
+            "environment mismatch: checkpoint has {}/{:?}, supplied ByteEnv/{:?}",
+            string_value(environment_meta, "class")?,
+            string_value(environment_meta, "name")?,
+            environment.name
+        ))
+        .into());
+    }
+
+    let generation = usize_value(meta, "generation")?;
+    let tick_count = u64_value(meta, "tick_count")?;
+    let fingerprint_config = root
+        .get("fingerprint_config")
+        .map(
+            |value| -> Result<FingerprintConfig, Box<dyn std::error::Error>> {
+                let table = value_table(value, "fingerprint_config")?;
+                let config = FingerprintConfig {
+                    bits: u8_value_default(table, "bits", 32)?,
+                    tournament_k: usize_value_default(table, "tournament_k", 1)?,
+                    mutation_rate: float_value_default(table, "mutation_rate", 0.01)?,
+                };
+                config.validate().map_err(invalid_data)?;
+                Ok(config)
+            },
+        )
+        .transpose()?;
+
+    let file = File::open(stem.with_extension("npz"))?;
+    let mut npz = NpzReader::new(BufReader::new(file))?;
+    let history_fitnesses: Option<Array2<f64>> = npz.by_name("fitness_history_fitnesses.npy").ok();
+    let history_meta = root
+        .get("fitness_history")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if history_fitnesses
+        .as_ref()
+        .is_some_and(|fitnesses| fitnesses.nrows() != history_meta.len())
+    {
+        return Err(invalid_data("fitness history row count does not match TOML").into());
+    }
+    let mut fitness_history = Vec::with_capacity(history_meta.len());
+    for (index, value) in history_meta.iter().enumerate() {
+        let table = value_table(value, "fitness_history entry")?;
+        fitness_history.push(GenerationStats {
+            generation: usize_value(table, "generation")?,
+            min_fitness: float_value(table, "min_fitness")?,
+            max_fitness: float_value(table, "max_fitness")?,
+            mean_fitness: float_value(table, "mean_fitness")?,
+            duration_s: float_value_default(table, "duration_s", 0.0)?,
+            fitnesses: history_fitnesses
+                .as_ref()
+                .map(|values| values.row(index).to_vec())
+                .unwrap_or_default(),
+        });
+    }
+
+    let automata_meta = root
+        .get("automata")
+        .and_then(Value::as_array)
+        .ok_or_else(|| invalid_data("checkpoint is missing automata"))?;
+    if automata_meta.is_empty() {
+        return Err(invalid_data("checkpoint population is empty").into());
+    }
+    if history_fitnesses
+        .as_ref()
+        .is_some_and(|fitnesses| fitnesses.ncols() != automata_meta.len())
+    {
+        return Err(invalid_data("fitness history width does not match population").into());
+    }
+
+    let mut automata = Vec::with_capacity(automata_meta.len());
+    let mut state_bits = None;
+    let mut num_clauses = None;
+    for (index, value) in automata_meta.iter().enumerate() {
+        let table = value_table(value, "automaton")?;
+        if u8_value_default(table, "env_bits", 16)? != 16
+            || u8_value_default(table, "resp_bits", 8)? != 8
+        {
+            return Err(
+                invalid_data("Rust WikiAutomaton requires env_bits=16 and resp_bits=8").into(),
+            );
+        }
+        let current_state_bits = u8_value(table, "state_bits")?;
+        if state_bits
+            .replace(current_state_bits)
+            .is_some_and(|bits| bits != current_state_bits)
+        {
+            return Err(invalid_data("checkpoint automata have mixed state widths").into());
+        }
+
+        let genetic_meta = child_table(table, "genetic_code")?;
+        if string_value(genetic_meta, "type")? != "GeneticCodeTsetlin" {
+            return Err(invalid_data("Wiki checkpoints require GeneticCodeTsetlin").into());
+        }
+        let prefix = format!("automaton_{index}_");
+        let positive: Array2<u64> = npz.by_name(&format!("{prefix}w_pos.npy"))?;
+        let negative: Array2<u64> = npz.by_name(&format!("{prefix}w_neg.npy"))?;
+        if positive.raw_dim() != negative.raw_dim() {
+            return Err(invalid_data("Tsetlin positive/negative matrix shapes differ").into());
+        }
+        let output_bits =
+            u8_value_default(genetic_meta, "resp_bits", u8::try_from(positive.nrows())?)?;
+        if output_bits != current_state_bits + 8 || positive.nrows() != output_bits as usize {
+            return Err(invalid_data("Tsetlin output width does not match WikiAutomaton").into());
+        }
+        let clauses = positive.ncols();
+        if usize_value_default(genetic_meta, "num_clauses", clauses)? != clauses {
+            return Err(invalid_data("Tsetlin matrix columns do not match num_clauses").into());
+        }
+        if num_clauses
+            .replace(clauses)
+            .is_some_and(|value| value != clauses)
+        {
+            return Err(invalid_data("checkpoint automata have mixed clause counts").into());
+        }
+        let input_bits = u8_value_default(genetic_meta, "input_bits", 24)?;
+        if input_bits != current_state_bits + 16 {
+            return Err(invalid_data("Tsetlin input width does not match WikiAutomaton").into());
+        }
+        let genetic_code = GeneticCode::Tsetlin(GeneticCodeTsetlin::from_masks(
+            positive.iter().copied().collect(),
+            negative.iter().copied().collect(),
+            output_bits,
+            clauses,
+            input_bits,
+            optional_seed(genetic_meta),
+        )?);
+
+        let coords = table
+            .get("coords")
+            .and_then(Value::as_array)
+            .ok_or_else(|| invalid_data("automaton coords must be an array"))?;
+        if coords.len() != 2 {
+            return Err(
+                invalid_data("WikiAutomaton coords must contain text and byte indices").into(),
+            );
+        }
+        let coord = |position: usize| -> Result<usize, io::Error> {
+            coords[position]
+                .as_integer()
+                .and_then(|value| usize::try_from(value).ok())
+                .ok_or_else(|| invalid_data("automaton coordinate is invalid"))
+        };
+        let fingerprint = match (
+            table.get("fingerprint_bits").and_then(Value::as_integer),
+            table.get("fingerprint_value").and_then(Value::as_integer),
+        ) {
+            (Some(bits), Some(value)) => Some(SelectionFingerprint::with_value(
+                u8::try_from(bits).map_err(|_| invalid_data("fingerprint bits are invalid"))?,
+                u64::try_from(value).map_err(|_| invalid_data("fingerprint value is invalid"))?,
+            )),
+            (None, None) => None,
+            _ => return Err(invalid_data("fingerprint bits/value must appear together").into()),
+        };
+        let mut automaton = WikiAutomaton::restore(
+            genetic_code,
+            environment,
+            current_state_bits,
+            resume.seed.wrapping_add(index as u64 + 1),
+            coord(0)?,
+            coord(1)?,
+            u16_value_default(table, "internal_state", 0)?,
+            float_value(table, "fitness")?,
+            i32_value_default(table, "last_action", -1)?,
+            fingerprint,
+        )?;
+        automaton.id = index as u64;
+        automata.push(automaton);
+    }
+
+    let config = PopConfig {
+        size: automata.len(),
+        state_bits: state_bits.expect("non-empty automata checked above"),
+        ticks_per_restart: resume.ticks_per_restart,
+        restarts_per_gen: resume.restarts_per_gen,
+        checkpoint_interval: resume.checkpoint_interval,
+        mutation_rate: resume.mutation_rate,
+        genetic_code: GeneticCodeConfig {
+            kind: GeneticCodeKind::Tsetlin,
+            tsetlin_clauses: num_clauses.expect("non-empty automata checked above"),
+        },
+        fingerprint: fingerprint_config,
+    };
+    Ok(WikiPopulation::restore(
+        automata,
+        generation,
+        tick_count,
+        fitness_history,
+        config,
+        resume.seed,
+    ))
+}
+
 fn invalid_data(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message.into())
 }
@@ -433,6 +674,14 @@ fn u8_value(table: &Table, key: &str) -> Result<u8, io::Error> {
 fn u8_value_default(table: &Table, key: &str, default: u8) -> Result<u8, io::Error> {
     match table.get(key) {
         Some(_) => u8_value(table, key),
+        None => Ok(default),
+    }
+}
+
+fn u16_value_default(table: &Table, key: &str, default: u16) -> Result<u16, io::Error> {
+    match table.get(key) {
+        Some(_) => u16::try_from(integer_value(table, key)?)
+            .map_err(|_| invalid_data(format!("{key} must fit in u16"))),
         None => Ok(default),
     }
 }
@@ -624,6 +873,141 @@ fn build_toml(pop: &Population, maze: &Maze) -> Table {
     root
 }
 
+fn build_wiki_toml(pop: &WikiPopulation, environment: &WikiEnvironment) -> Table {
+    let cfg = &pop.config;
+    let mut meta = Table::new();
+    meta.insert("class".into(), Value::String("Population".into()));
+    meta.insert("schema_version".into(), Value::Integer(1));
+    meta.insert("generation".into(), Value::Integer(pop.generation as i64));
+    meta.insert("tick_count".into(), Value::Integer(pop.tick_count as i64));
+    meta.insert(
+        "automaton_class".into(),
+        Value::String("WikiAutomaton".into()),
+    );
+
+    let mut env = Table::new();
+    env.insert("class".into(), Value::String("ByteEnv".into()));
+    env.insert("name".into(), Value::String(environment.name.clone()));
+
+    let config_table = CheckpointConfig {
+        enabled: false,
+        generation_interval: 0,
+    }
+    .to_toml_table("runs");
+
+    let mut automaton_params = Table::new();
+    automaton_params.insert("env_bits".into(), Value::Integer(16));
+    automaton_params.insert("state_bits".into(), Value::Integer(cfg.state_bits as i64));
+    automaton_params.insert("resp_bits".into(), Value::Integer(8));
+    automaton_params.insert(
+        "num_clauses".into(),
+        Value::Integer(cfg.genetic_code.tsetlin_clauses as i64),
+    );
+
+    let fitness_history: Vec<Value> = pop
+        .fitness_history
+        .iter()
+        .map(|stats| {
+            let mut table = Table::new();
+            table.insert("generation".into(), Value::Integer(stats.generation as i64));
+            table.insert("min_fitness".into(), Value::Float(stats.min_fitness));
+            table.insert("max_fitness".into(), Value::Float(stats.max_fitness));
+            table.insert("mean_fitness".into(), Value::Float(stats.mean_fitness));
+            table.insert("duration_s".into(), Value::Float(stats.duration_s));
+            Value::Table(table)
+        })
+        .collect();
+
+    let automata: Vec<Value> = pop
+        .automata
+        .iter()
+        .map(|automaton| {
+            let code = &automaton.genetic_code;
+            let tsetlin = code
+                .as_tsetlin()
+                .expect("Wiki checkpoints require GeneticCodeTsetlin");
+            let mut genetic_code = Table::new();
+            genetic_code.insert("type".into(), Value::String(code.code_type().into()));
+            genetic_code.insert("schema_version".into(), Value::Integer(1));
+            genetic_code.insert("resp_bits".into(), Value::Integer(code.resp_bits() as i64));
+            genetic_code.insert(
+                "num_clauses".into(),
+                Value::Integer(tsetlin.num_clauses() as i64),
+            );
+            genetic_code.insert(
+                "input_bits".into(),
+                Value::Integer(tsetlin.input_bits() as i64),
+            );
+            genetic_code.insert("threshold".into(), Value::Float(tsetlin.threshold()));
+            if let Some(seed) = code.code_seed() {
+                genetic_code.insert("seed".into(), Value::Integer(seed as i64));
+            }
+
+            let mut table = Table::new();
+            table.insert("name".into(), Value::String("Terry-2".into()));
+            table.insert("fitness".into(), Value::Float(automaton.fitness));
+            table.insert(
+                "coords".into(),
+                Value::Array(vec![
+                    Value::Integer(automaton.text_index as i64),
+                    Value::Integer(automaton.byte_index as i64),
+                ]),
+            );
+            table.insert(
+                "last_action".into(),
+                Value::Integer(automaton.last_action as i64),
+            );
+            table.insert("env_bits".into(), Value::Integer(16));
+            table.insert(
+                "state_bits".into(),
+                Value::Integer(automaton.state_bits as i64),
+            );
+            table.insert("resp_bits".into(), Value::Integer(8));
+            table.insert(
+                "internal_state".into(),
+                Value::Integer(automaton.internal_state as i64),
+            );
+            if let Some(fingerprint) = &automaton.fingerprint {
+                table.insert(
+                    "fingerprint_bits".into(),
+                    Value::Integer(fingerprint.bits() as i64),
+                );
+                table.insert(
+                    "fingerprint_value".into(),
+                    Value::Integer(fingerprint.value() as i64),
+                );
+            }
+            table.insert("genetic_code".into(), Value::Table(genetic_code));
+            Value::Table(table)
+        })
+        .collect();
+
+    let mut root = Table::new();
+    root.insert("meta".into(), Value::Table(meta));
+    root.insert("environment".into(), Value::Table(env));
+    root.insert("config".into(), Value::Table(config_table));
+    if let Some(fingerprint) = &cfg.fingerprint {
+        let mut fingerprint_config = Table::new();
+        fingerprint_config.insert("bits".into(), Value::Integer(fingerprint.bits as i64));
+        fingerprint_config.insert(
+            "tournament_k".into(),
+            Value::Integer(fingerprint.tournament_k as i64),
+        );
+        fingerprint_config.insert(
+            "mutation_rate".into(),
+            Value::Float(fingerprint.mutation_rate),
+        );
+        root.insert(
+            "fingerprint_config".into(),
+            Value::Table(fingerprint_config),
+        );
+    }
+    root.insert("automaton_params".into(), Value::Table(automaton_params));
+    root.insert("fitness_history".into(), Value::Array(fitness_history));
+    root.insert("automata".into(), Value::Array(automata));
+    root
+}
+
 // ---------------------------------------------------------------------------
 // NPZ builder
 // ---------------------------------------------------------------------------
@@ -701,6 +1085,51 @@ fn build_npz(pop: &Population) -> io::Result<Vec<u8>> {
     Ok(cursor.into_inner())
 }
 
+fn build_wiki_npz(pop: &WikiPopulation) -> io::Result<Vec<u8>> {
+    use zip::write::{FileOptions, ZipWriter};
+    use zip::CompressionMethod;
+
+    let cursor = std::io::Cursor::new(Vec::new());
+    let mut zip = ZipWriter::new(cursor);
+    let options: FileOptions<()> =
+        FileOptions::default().compression_method(CompressionMethod::Deflated);
+
+    for (index, automaton) in pop.automata.iter().enumerate() {
+        let code = automaton
+            .genetic_code
+            .as_tsetlin()
+            .expect("Wiki checkpoints require GeneticCodeTsetlin");
+        zip.start_file(format!("automaton_{index}_w_pos.npy"), options)?;
+        write_npy_u64_2d(
+            &mut zip,
+            code.positive_masks(),
+            code.output_bits() as usize,
+            code.num_clauses(),
+        )?;
+        zip.start_file(format!("automaton_{index}_w_neg.npy"), options)?;
+        write_npy_u64_2d(
+            &mut zip,
+            code.negative_masks(),
+            code.output_bits() as usize,
+            code.num_clauses(),
+        )?;
+    }
+
+    if !pop.fitness_history.is_empty() {
+        let rows = pop.fitness_history.len();
+        let columns = pop.fitness_history[0].fitnesses.len();
+        let values: Vec<f64> = pop
+            .fitness_history
+            .iter()
+            .flat_map(|stats| stats.fitnesses.iter().copied())
+            .collect();
+        zip.start_file("fitness_history_fitnesses.npy", options)?;
+        write_npy_f64_2d(&mut zip, &values, rows, columns)?;
+    }
+
+    Ok(zip.finish()?.into_inner())
+}
+
 // ---------------------------------------------------------------------------
 // NPY helpers
 // ---------------------------------------------------------------------------
@@ -775,6 +1204,7 @@ mod tests {
     use crate::fingerprint::FingerprintConfig;
     use crate::genetic_code::GeneticCodeConfig;
     use crate::population::PopConfig;
+    use crate::wiki::{WikiEnvironment, WikiPopulation};
     use std::process::Command;
 
     #[test]
@@ -959,6 +1389,150 @@ for name, expected in (("dict", GeneticCodeDict), ("list", GeneticCodeList)):
             assert_eq!(original.threshold(), loaded.threshold());
             assert_eq!(original.num_clauses(), loaded.num_clauses());
         }
+    }
+
+    #[test]
+    fn python_loads_rust_wiki_population_checkpoint() {
+        let environment = WikiEnvironment::new("WikiEnv", vec![b"abc".to_vec()]).unwrap();
+        let config = PopConfig {
+            size: 2,
+            state_bits: 8,
+            ticks_per_restart: 3,
+            restarts_per_gen: 1,
+            checkpoint_interval: 0,
+            mutation_rate: 0.01,
+            genetic_code: GeneticCodeConfig {
+                kind: GeneticCodeKind::Tsetlin,
+                tsetlin_clauses: 2,
+            },
+            fingerprint: Some(FingerprintConfig {
+                bits: 4,
+                tournament_k: 2,
+                mutation_rate: 0.01,
+            }),
+        };
+        let mut population = WikiPopulation::new(&environment, config, 123);
+        population.run_generation(&environment);
+        population.evolve(&environment);
+        let directory =
+            std::env::temp_dir().join(format!("terry-rust-wiki-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let stem = directory.join("population");
+        save_wiki_population(&population, &environment, &stem).unwrap();
+
+        let python = if Path::new(".venv/bin/python").exists() {
+            ".venv/bin/python"
+        } else {
+            "python3"
+        };
+        let script = format!(
+            r#"
+from pathlib import Path
+from arc3_agi.environment import ByteEnv
+from arc3_agi.genetic_code import GeneticCodeTsetlin
+from arc3_agi.population import Population
+from arc3_agi.wiki_text_2 import WikiAutomaton
+
+environment = ByteEnv(name="WikiEnv", array=["abc"])
+population = Population.load(
+    Path({stem:?}),
+    environment=environment,
+    AutomatonClass=WikiAutomaton,
+)
+assert population.generation == 1
+assert len(population.automata) == 2
+assert population._fingerprint_config.bits == 4
+for automaton in population.automata:
+    assert isinstance(automaton.genetic_code, GeneticCodeTsetlin)
+    assert automaton.genetic_code._w_pos.shape == (16, 2)
+    assert automaton.genetic_code._w_neg.shape == (16, 2)
+    assert automaton.fingerprint is not None
+"#,
+            stem = stem.display().to_string()
+        );
+        let output = Command::new(python)
+            .arg("-c")
+            .arg(script)
+            .output()
+            .expect("run Python Wiki checkpoint compatibility check");
+        std::fs::remove_dir_all(&directory).ok();
+        assert!(
+            output.status.success(),
+            "Python failed to load Rust Wiki checkpoint:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn rust_loads_python_wiki_population_checkpoint() {
+        let directory =
+            std::env::temp_dir().join(format!("terry-python-wiki-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let stem = directory.join("population");
+        let python = if Path::new(".venv/bin/python").exists() {
+            ".venv/bin/python"
+        } else {
+            "python3"
+        };
+        let script = format!(
+            r#"
+from pathlib import Path
+from arc3_agi.checkpoint import CheckpointConfig
+from arc3_agi.environment import ByteEnv
+from arc3_agi.fingerprint import FingerprintConfig
+from arc3_agi.population import Population
+from arc3_agi.wiki_text_2 import WikiAutomaton
+
+environment = ByteEnv(name="WikiEnv", array=["abc"])
+population = Population(
+    size=2,
+    AutomatonClass=WikiAutomaton,
+    environment=environment,
+    seed=123,
+    automaton_params={{"state_bits": 8, "num_clauses": 2}},
+    checkpoint_config=CheckpointConfig(enabled=False),
+    fingerprint_config=FingerprintConfig(bits=4, tournament_k=2),
+)
+population.run_generation(3)
+population.evolve()
+population.save(Path({stem:?}))
+"#,
+            stem = stem.display().to_string()
+        );
+        let output = Command::new(python)
+            .arg("-c")
+            .arg(script)
+            .output()
+            .expect("generate Python Wiki checkpoint");
+        assert!(
+            output.status.success(),
+            "Python failed to save Wiki checkpoint:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let environment = WikiEnvironment::new("WikiEnv", vec![b"abc".to_vec()]).unwrap();
+        let population = load_wiki_population(
+            &stem,
+            &environment,
+            &ResumeConfig {
+                ticks_per_restart: 3,
+                restarts_per_gen: 1,
+                checkpoint_interval: 0,
+                mutation_rate: 0.01,
+                seed: 123,
+            },
+        )
+        .unwrap();
+        std::fs::remove_dir_all(&directory).ok();
+
+        assert_eq!(population.generation, 1);
+        assert_eq!(population.automata.len(), 2);
+        assert_eq!(population.config.state_bits, 8);
+        assert_eq!(population.config.genetic_code.tsetlin_clauses, 2);
+        assert!(population
+            .automata
+            .iter()
+            .all(|automaton| automaton.fingerprint.is_some()));
     }
 
     #[test]

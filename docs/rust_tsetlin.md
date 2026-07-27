@@ -27,8 +27,10 @@ cargo run --release --bin maze-runner -- \
 ```
 
 The Tsetlin threshold is always a strict majority of the configured clause
-count. Clause count and threshold remain fixed during crossover. Input width is
-`9 + state_bits`; output width is `state_bits + 2`. Tsetlin starts with 4 clauses
+count. Clause count and threshold remain fixed during crossover. Maze input
+width is `9 + state_bits`; output width is `state_bits + 2`. The implementation
+supports up to 64 input bits and 16 output bits so the same code also powers the
+[Rust WikiText runner](rust_wikitext.md). Tsetlin starts with 4 clauses for Maze
 and a 5% active-literal probability, matching the Python
 `GeneticCodeTsetlin` defaults.
 
@@ -82,7 +84,7 @@ Rust writes the existing schema-v1 TOML/NPZ format:
 - List: `automaton_N_values` as an `int64` array.
 - Tsetlin: `automaton_N_w_pos` and `automaton_N_w_neg` as row-major `uint64`
   matrices shaped `[response_bits, clauses]`.
-- Energy grids are `uint8`; full fitness history is `float64`.
+- Maze energy grids are `uint8`; full fitness history is `float64`.
 - Tsetlin metadata includes response width, clause count, input width, derived
   threshold, and seed. Legacy threshold values are accepted but the strict
   majority is derived from the clause count when loading.
@@ -107,6 +109,6 @@ history from generation 1 through the target.
 cargo bench --bench tsetlin
 ```
 
-The benchmark measures the default 6-output-bit by 4-clause lookup and
-crossover paths. Lookup uses flat row-major `u64` masks and performs no heap
-allocation or virtual dispatch per tick.
+The benchmark measures the default Maze 6-output-bit by 4-clause paths and the
+Wiki 16-output-bit by 16-clause paths. Lookup uses flat row-major `u64` masks and
+performs no heap allocation or virtual dispatch per tick.

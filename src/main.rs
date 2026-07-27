@@ -8,13 +8,11 @@
 ///   maze-runner --name baseline-state3 --state-bits 3 --populations 100
 use std::path::PathBuf;
 
-use chrono::Utc;
 use clap::Parser;
-use rand::RngCore;
 use serde_json::json;
 
 use rust_2::checkpoint::{inspect_checkpoint, CheckpointConfig};
-use rust_2::experiment::{resolve_database_url, ExperimentStore};
+use rust_2::experiment::run_tracked_experiment;
 use rust_2::fingerprint::FingerprintConfig;
 use rust_2::genetic_code::{GeneticCodeConfig, GeneticCodeKind};
 use rust_2::population::PopConfig;
@@ -124,17 +122,8 @@ struct Cli {
     fingerprint_mutation_rate: f64,
 }
 
-fn generate_run_id() -> String {
-    let ts = Utc::now().format("%Y%m%dT%H%M%S");
-    let mut rng = rand::rng();
-    let hex: u32 = (rng.next_u32()) & 0x00FFFFFF;
-    format!("{ts}_{hex:06x}")
-}
-
 fn run_experiment(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     validate_cli(cli)?;
-    let db_url = resolve_database_url(cli.database_url.as_deref());
-    let run_id = generate_run_id();
     let resume_summary = cli.resume.as_deref().map(inspect_checkpoint).transpose()?;
     let maze_name = cli
         .maze_name
@@ -235,101 +224,36 @@ fn run_experiment(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         "resume_fingerprint_enabled": resume_summary.as_ref().map(|summary| summary.fingerprint_enabled),
     });
 
-    // --- Claim the experiment ---
-    let mut store = ExperimentStore::connect(&db_url)?;
-    let (experiment_id, already_done) =
-        store.claim_experiment(&cli.name, &cli.description, &run_id, &params)?;
-
-    if already_done {
-        println!(
-            "\nExperiment '{}' already completed → id={experiment_id}; skipping.",
-            cli.name
-        );
-        return Ok(());
-    }
-
-    store.mark_running(experiment_id)?;
-    let interrupt_db_url = db_url.clone();
-    ctrlc::set_handler(move || {
-        eprintln!("\nCtrl-C received; marking experiment {experiment_id} as failed.");
-        match ExperimentStore::connect(&interrupt_db_url) {
-            Ok(mut interrupt_store) => {
-                if let Err(error) =
-                    interrupt_store.mark_failed(experiment_id, "interrupted by Ctrl-C")
-                {
-                    eprintln!("Failed to update experiment {experiment_id}: {error}");
-                }
-            }
-            Err(error) => eprintln!("Failed to connect to the experiment database: {error}"),
-        }
-        std::process::exit(130);
-    })?;
-    // Drop the store to release the connection while the pool runs.
-    drop(store);
-
-    if let Some(checkpoint) = &cli.resume {
-        println!(
-            "\nMaze Runner (Rust) — '{}'\n  resume {} -> generation {}\n  Run ID: {run_id}  dir: {}",
-            cli.name,
-            checkpoint.display(),
-            cli.generations,
-            cli.base_dir.join(&run_id).display(),
-        );
-    } else {
-        println!(
-            "\nMaze Runner (Rust) — '{}'\n  {} total × {} parallel × {} gens\n  Run ID: {run_id}  dir: {}",
-            cli.name,
-            cli.populations,
-            cli.parallel,
-            cli.generations,
-            cli.base_dir.join(&run_id).display(),
-        );
-    }
-
-    let run_dir = cli.base_dir.join(&run_id);
-
-    // --- Run the pool ---
-    let result = std::panic::catch_unwind(|| -> Result<(), Box<dyn std::error::Error>> {
-        if let Some(checkpoint) = &cli.resume {
-            run_resumed_population(checkpoint, &run_dir, &runner_config)?;
-        } else {
-            run_pool(&run_dir, &runner_config);
-        }
-        Ok(())
-    });
-
-    match result {
-        Ok(Ok(())) => {
-            // --- Ingest results ---
-            let mut store = ExperimentStore::connect(&db_url)?;
-            let n_rows = store.ingest_run(experiment_id, &run_dir)?;
-            store.mark_completed(experiment_id)?;
-            println!(
-                "\nExperiment '{}' done → id={experiment_id}  ({n_rows} generation-stat rows)",
-                cli.name
-            );
-        }
-        Ok(Err(error)) => {
-            let message = error.to_string();
-            let mut store = ExperimentStore::connect(&db_url)?;
-            store.mark_failed(experiment_id, &message)?;
-            return Err(error);
-        }
-        Err(e) => {
-            let msg = if let Some(s) = e.downcast_ref::<String>() {
-                s.clone()
-            } else if let Some(s) = e.downcast_ref::<&str>() {
-                s.to_string()
+    run_tracked_experiment(
+        &cli.name,
+        &cli.description,
+        &params,
+        &cli.base_dir,
+        cli.database_url.as_deref(),
+        |run_id, run_dir| {
+            if let Some(checkpoint) = &cli.resume {
+                println!(
+                    "\nMaze Runner (Rust) - '{}'\n  resume {} -> generation {}\n  Run ID: {run_id}  dir: {}",
+                    cli.name,
+                    checkpoint.display(),
+                    cli.generations,
+                    run_dir.display(),
+                );
+                run_resumed_population(checkpoint, run_dir, &runner_config)?;
             } else {
-                "unknown panic".into()
-            };
-            let mut store = ExperimentStore::connect(&db_url)?;
-            store.mark_failed(experiment_id, &msg)?;
-            return Err(format!("pool panicked: {msg}").into());
-        }
-    }
-
-    Ok(())
+                println!(
+                    "\nMaze Runner (Rust) - '{}'\n  {} total x {} parallel x {} gens\n  Run ID: {run_id}  dir: {}",
+                    cli.name,
+                    cli.populations,
+                    cli.parallel,
+                    cli.generations,
+                    run_dir.display(),
+                );
+                run_pool(run_dir, &runner_config);
+            }
+            Ok(())
+        },
+    )
 }
 
 fn validate_cli(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {

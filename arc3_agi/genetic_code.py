@@ -407,31 +407,33 @@ class GeneticCodeTsetlin(GeneticCode):
             mutation_rows, mutation_columns = (
                 rng.random(shape) < mutation_rate
             ).nonzero()
-            mutation_bits = rng.integers(self.input_bits, size=len(mutation_rows))
-            alternative_states = rng.integers(2, size=len(mutation_rows))
+            mutation_count = len(mutation_rows)
+            if mutation_count:
+                mutation_bits = rng.integers(self.input_bits, size=mutation_count)
+                alternative_states = rng.integers(2, size=mutation_count)
+                bit_masks = uint64(1) << mutation_bits.astype(uint64, copy=False)
 
-            for row, column, bit, alternative in zip(
-                mutation_rows,
-                mutation_columns,
-                mutation_bits,
-                alternative_states,
-            ):
-                bit_mask = uint64(1) << uint64(bit)
-                was_positive = bool(child_w_pos[row, column] & bit_mask)
-                was_negative = bool(child_w_neg[row, column] & bit_mask)
-                child_w_pos[row, column] &= ~bit_mask
-                child_w_neg[row, column] &= ~bit_mask
+                selected_pos = child_w_pos[mutation_rows, mutation_columns].copy()
+                selected_neg = child_w_neg[mutation_rows, mutation_columns].copy()
+                was_positive = (selected_pos & bit_masks) != 0
+                was_negative = (selected_neg & bit_masks) != 0
 
-                if not was_positive and not was_negative:
-                    if alternative == 0:
-                        child_w_pos[row, column] |= bit_mask
-                    else:
-                        child_w_neg[row, column] |= bit_mask
-                elif was_positive:
-                    if alternative == 1:
-                        child_w_neg[row, column] |= bit_mask
-                elif alternative == 1:
-                    child_w_pos[row, column] |= bit_mask
+                keep_mask = ~bit_masks
+                selected_pos &= keep_mask
+                selected_neg &= keep_mask
+
+                # Incremental transitions for a targeted literal:
+                # positive/negative -> ignored, and ignored -> positive/negative.
+                choose_alt_one = alternative_states == 1
+                was_ignored = ~was_positive & ~was_negative
+                set_positive = was_ignored & ~choose_alt_one
+                set_negative = was_ignored & choose_alt_one
+
+                selected_pos |= where(set_positive, bit_masks, UINT64_ZERO)
+                selected_neg |= where(set_negative, bit_masks, UINT64_ZERO)
+
+                child_w_pos[mutation_rows, mutation_columns] = selected_pos
+                child_w_neg[mutation_rows, mutation_columns] = selected_neg
 
         return self.__class__(
             code=(child_w_pos, child_w_neg),

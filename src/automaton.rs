@@ -169,6 +169,9 @@ impl MazeAutomaton {
     /// Perform one tick: look up the environment, advance the Mealy machine,
     /// pay the energy cost, and execute the resulting action.
     pub fn tick(&mut self, maze: &Maze) {
+        if !self.is_active() {
+            return;
+        }
         let env_local = maze.get_local(self.x, self.y, self.orientation);
         let input_code =
             ((self.internal_state as u32) << self.env_bits) | (env_local & self.env_mask) as u32;
@@ -243,5 +246,37 @@ impl MazeAutomaton {
         self.fitness = 0.0;
         self.internal_state = 0;
         self.last_action = -1;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::genetic_code::GeneticCodeConfig;
+    use crate::maze::Maze;
+
+    #[test]
+    fn exhausted_maze_automaton_ticks_no_further() {
+        let maze = Maze::new("maze-test", 4, 7);
+        let mut automaton = MazeAutomaton::new(&maze, 4, &GeneticCodeConfig::default(), 11)
+            .expect("maze automaton should construct");
+
+        automaton.energy = 0;
+        let before_x = automaton.x;
+        let before_y = automaton.y;
+        let before_orientation = automaton.orientation;
+        let before_internal_state = automaton.internal_state;
+        let before_fitness = automaton.fitness;
+        let before_last_action = automaton.last_action;
+
+        automaton.tick(&maze);
+
+        assert_eq!(automaton.energy, 0);
+        assert_eq!(automaton.x, before_x);
+        assert_eq!(automaton.y, before_y);
+        assert_eq!(automaton.orientation, before_orientation);
+        assert_eq!(automaton.internal_state, before_internal_state);
+        assert_eq!(automaton.fitness, before_fitness);
+        assert_eq!(automaton.last_action, before_last_action);
     }
 }

@@ -247,9 +247,7 @@ impl<A: PopulationAutomaton> PopulationCore<A> {
 
             for _ in 0..self.config.ticks_per_restart {
                 for a in &mut self.automata {
-                    if a.is_active() {
-                        a.tick(environment);
-                    }
+                    a.tick(environment);
                 }
                 self.tick_count += 1;
             }

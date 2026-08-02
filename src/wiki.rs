@@ -18,7 +18,6 @@ pub const WIKITEXT_DATASET_NAME: &str = "Salesforce/wikitext";
 pub const WIKITEXT_DATASET_CONFIG: &str = "wikitext-2-raw-v1";
 pub const WIKITEXT_SPLIT: &str = "train";
 const HUGGING_FACE_DATASETS_URL: &str = "https://huggingface.co/datasets";
-const WIKI_RESET_SEQUENCE_SEED: u64 = 0x5EED_5EED_5EED_5EED;
 
 pub type WikiResult<T> = Result<T, Box<dyn Error>>;
 
@@ -105,7 +104,7 @@ impl WikiAutomaton {
         genetic_code: GeneticCode,
         environment: &WikiEnvironment,
         state_bits: u8,
-        _rng: &mut Xoshiro256PlusPlus,
+        rng: &mut Xoshiro256PlusPlus,
     ) -> Self {
         debug_assert!(!environment.texts().is_empty());
         Self {
@@ -122,9 +121,9 @@ impl WikiAutomaton {
             last_action: -1,
             genetic_code,
             fingerprint: None,
-            // Keep reset targets random over time, but identical at each reset
-            // step for all automata so fitness is comparable.
-            rng: Xoshiro256PlusPlus::seed_from_u64(WIKI_RESET_SEQUENCE_SEED),
+            // Match Python behavior: each automaton has its own seeded RNG
+            // stream for reset start positions.
+            rng: rng.clone(),
         }
     }
 
@@ -727,7 +726,7 @@ mod tests {
     }
 
     #[test]
-    fn reset_uses_the_same_text_sequence_for_all_automata() {
+    fn reset_sequence_is_seeded_per_automaton() {
         let environment = WikiEnvironment::new(
             "test",
             vec![b"aaa".to_vec(), b"bbb".to_vec(), b"ccc".to_vec()],
@@ -744,14 +743,30 @@ mod tests {
             GeneticCode::new(&GeneticCodeConfig::default(), 16, 24, 8).unwrap(),
             &environment,
             8,
+            1,
+        )
+        .unwrap();
+        let mut third = WikiAutomaton::with_code(
+            GeneticCode::new(&GeneticCodeConfig::default(), 16, 24, 9).unwrap(),
+            &environment,
+            8,
             2,
         )
         .unwrap();
 
+        let mut first_sequence = Vec::new();
+        let mut second_sequence = Vec::new();
+        let mut third_sequence = Vec::new();
         for _ in 0..8 {
             first.reset(&environment);
             second.reset(&environment);
-            assert_eq!(first.text_index, second.text_index);
+            third.reset(&environment);
+            first_sequence.push(first.text_index);
+            second_sequence.push(second.text_index);
+            third_sequence.push(third.text_index);
         }
+
+        assert_eq!(first_sequence, second_sequence);
+        assert_ne!(first_sequence, third_sequence);
     }
 }

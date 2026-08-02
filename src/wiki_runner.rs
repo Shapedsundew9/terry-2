@@ -59,8 +59,11 @@ pub fn run_pool(
     config: &WikiRunnerConfig,
 ) -> Vec<Vec<GenerationStats>> {
     println!(
-        "  WikiText entries: {}   pop_size: {}   gens: {}   restarts/gen: {}   ticks/restart: {}",
+        "  WikiText entries: {}   observation: {} bytes/{} bits   state: {} bits\n  pop_size: {}   gens: {}   restarts/gen: {}   ticks/restart: {}",
         environment.texts().len(),
+        environment.observation_bytes(),
+        environment.observation_bits(),
+        config.pop_config.state_bits,
         config.pop_config.size,
         config.max_generations,
         config.pop_config.restarts_per_gen,

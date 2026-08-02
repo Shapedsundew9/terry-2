@@ -93,6 +93,7 @@ pub struct ResumeConfig {
 pub struct CheckpointSummary {
     pub generation: usize,
     pub population_size: usize,
+    pub env_bits: u8,
     pub state_bits: u8,
     pub code_type: String,
     pub tsetlin_clauses: Option<usize>,
@@ -120,6 +121,7 @@ pub fn inspect_checkpoint(stem: &Path) -> Result<CheckpointSummary, Box<dyn std:
     Ok(CheckpointSummary {
         generation: usize_value(meta, "generation")?,
         population_size: automata.len(),
+        env_bits: u8_value_default(first, "env_bits", 16)?,
         state_bits: u8_value(first, "state_bits")?,
         code_type: string_value(genetic_code, "type")?.to_string(),
         tsetlin_clauses: genetic_code
@@ -500,12 +502,14 @@ pub fn load_wiki_population(
     let mut num_clauses = None;
     for (index, value) in automata_meta.iter().enumerate() {
         let table = value_table(value, "automaton")?;
-        if u8_value_default(table, "env_bits", 16)? != 16
+        let environment_bits = environment.observation_bits();
+        if u8_value_default(table, "env_bits", 16)? != environment_bits
             || u8_value_default(table, "resp_bits", 8)? != 8
         {
-            return Err(
-                invalid_data("Rust WikiAutomaton requires env_bits=16 and resp_bits=8").into(),
-            );
+            return Err(invalid_data(format!(
+                "WikiAutomaton checkpoint requires env_bits={environment_bits} and resp_bits=8"
+            ))
+            .into());
         }
         let current_state_bits = u8_value(table, "state_bits")?;
         if state_bits
@@ -541,7 +545,7 @@ pub fn load_wiki_population(
             return Err(invalid_data("checkpoint automata have mixed clause counts").into());
         }
         let input_bits = u8_value_default(genetic_meta, "input_bits", 24)?;
-        if input_bits != current_state_bits + 16 {
+        if input_bits != current_state_bits + environment_bits {
             return Err(invalid_data("Tsetlin input width does not match WikiAutomaton").into());
         }
         let genetic_code = GeneticCode::Tsetlin(GeneticCodeTsetlin::from_masks(
@@ -586,7 +590,7 @@ pub fn load_wiki_population(
             resume.seed.wrapping_add(index as u64 + 1),
             coord(0)?,
             coord(1)?,
-            u16_value_default(table, "internal_state", 0)?,
+            u64_value_default(table, "internal_state", 0)?,
             float_value(table, "fitness")?,
             i32_value_default(table, "last_action", -1)?,
             fingerprint,
@@ -666,6 +670,13 @@ fn u64_value(table: &Table, key: &str) -> Result<u64, io::Error> {
         .map_err(|_| invalid_data(format!("{key} must be a nonnegative u64")))
 }
 
+fn u64_value_default(table: &Table, key: &str, default: u64) -> Result<u64, io::Error> {
+    match table.get(key) {
+        Some(_) => u64_value(table, key),
+        None => Ok(default),
+    }
+}
+
 fn u8_value(table: &Table, key: &str) -> Result<u8, io::Error> {
     u8::try_from(integer_value(table, key)?)
         .map_err(|_| invalid_data(format!("{key} must fit in u8")))
@@ -674,14 +685,6 @@ fn u8_value(table: &Table, key: &str) -> Result<u8, io::Error> {
 fn u8_value_default(table: &Table, key: &str, default: u8) -> Result<u8, io::Error> {
     match table.get(key) {
         Some(_) => u8_value(table, key),
-        None => Ok(default),
-    }
-}
-
-fn u16_value_default(table: &Table, key: &str, default: u16) -> Result<u16, io::Error> {
-    match table.get(key) {
-        Some(_) => u16::try_from(integer_value(table, key)?)
-            .map_err(|_| invalid_data(format!("{key} must fit in u16"))),
         None => Ok(default),
     }
 }
@@ -899,7 +902,10 @@ fn build_wiki_toml(pop: &WikiPopulation, environment: &WikiEnvironment) -> Table
     .to_toml_table("runs");
 
     let mut automaton_params = Table::new();
-    automaton_params.insert("env_bits".into(), Value::Integer(16));
+    automaton_params.insert(
+        "env_bits".into(),
+        Value::Integer(environment.observation_bits() as i64),
+    );
     automaton_params.insert("state_bits".into(), Value::Integer(cfg.state_bits as i64));
     automaton_params.insert("resp_bits".into(), Value::Integer(8));
     automaton_params.insert(
@@ -963,7 +969,10 @@ fn build_wiki_toml(pop: &WikiPopulation, environment: &WikiEnvironment) -> Table
                 "last_action".into(),
                 Value::Integer(automaton.last_action as i64),
             );
-            table.insert("env_bits".into(), Value::Integer(16));
+            table.insert(
+                "env_bits".into(),
+                Value::Integer(environment.observation_bits() as i64),
+            );
             table.insert(
                 "state_bits".into(),
                 Value::Integer(automaton.state_bits as i64),
@@ -971,7 +980,10 @@ fn build_wiki_toml(pop: &WikiPopulation, environment: &WikiEnvironment) -> Table
             table.insert("resp_bits".into(), Value::Integer(8));
             table.insert(
                 "internal_state".into(),
-                Value::Integer(automaton.internal_state as i64),
+                Value::Integer(
+                    i64::try_from(automaton.internal_state)
+                        .expect("Wiki internal state must fit in checkpoint integer"),
+                ),
             );
             if let Some(fingerprint) = &automaton.fingerprint {
                 table.insert(
@@ -1395,6 +1407,55 @@ for name, expected in (("dict", GeneticCodeDict), ("list", GeneticCodeList)):
             assert_eq!(original.threshold(), loaded.threshold());
             assert_eq!(original.num_clauses(), loaded.num_clauses());
         }
+    }
+
+    #[test]
+    fn rust_round_trips_custom_width_wiki_checkpoint() {
+        let environment =
+            WikiEnvironment::with_observation_bytes("WikiEnv", vec![b"abc".to_vec()], 4).unwrap();
+        let config = PopConfig {
+            size: 2,
+            state_bits: 16,
+            ticks_per_restart: 3,
+            restarts_per_gen: 1,
+            checkpoint_interval: 0,
+            mutation_rate: 0.01,
+            genetic_code: GeneticCodeConfig {
+                kind: GeneticCodeKind::Tsetlin,
+                tsetlin_clauses: 2,
+            },
+            fingerprint: None,
+        };
+        let mut population = WikiPopulation::new(&environment, config, 123);
+        population.automata[0].internal_state = 0xabcd;
+        let directory = std::env::temp_dir().join(format!(
+            "terry-rust-custom-width-wiki-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let stem = directory.join("population");
+        save_wiki_population(&population, &environment, &stem).unwrap();
+
+        let summary = inspect_checkpoint(&stem).unwrap();
+        let resume = ResumeConfig {
+            ticks_per_restart: 3,
+            restarts_per_gen: 1,
+            checkpoint_interval: 0,
+            mutation_rate: 0.01,
+            seed: 123,
+        };
+        let restored = load_wiki_population(&stem, &environment, &resume).unwrap();
+        let mismatched_environment =
+            WikiEnvironment::new("WikiEnv", vec![b"abc".to_vec()]).unwrap();
+        let mismatch = load_wiki_population(&stem, &mismatched_environment, &resume);
+        std::fs::remove_dir_all(&directory).ok();
+
+        assert_eq!(summary.env_bits, 32);
+        assert_eq!(restored.automata[0].internal_state, 0xabcd);
+        let code = restored.automata[0].genetic_code.as_tsetlin().unwrap();
+        assert_eq!(code.input_bits(), 48);
+        assert_eq!(code.output_bits(), 24);
+        assert!(mismatch.is_err());
     }
 
     #[test]

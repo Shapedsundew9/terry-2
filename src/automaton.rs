@@ -174,9 +174,9 @@ impl MazeAutomaton {
         }
         let env_local = maze.get_local(self.x, self.y, self.orientation);
         let input_code =
-            ((self.internal_state as u32) << self.env_bits) | (env_local & self.env_mask) as u32;
+            ((self.internal_state as u64) << self.env_bits) | (env_local & self.env_mask) as u64;
         let output_code = self.genetic_code.get(input_code);
-        self.internal_state = (output_code & self.state_mask as u16) as u8;
+        self.internal_state = (output_code & self.state_mask as u64) as u8;
         let action = (output_code >> self.state_bits) as u8;
 
         self.energy -= 1;

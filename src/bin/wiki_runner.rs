@@ -65,6 +65,10 @@ struct Cli {
     #[arg(long, default_value_t = 8)]
     state_bits: u8,
 
+    /// Number of trailing raw bytes packed into each observation.
+    #[arg(long, default_value_t = 2)]
+    observation_bytes: u8,
+
     #[arg(long, default_value_t = 16)]
     tsetlin_clauses: usize,
 
@@ -112,12 +116,21 @@ fn run_experiment(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         {
             return Err("resume checkpoint must contain a Tsetlin WikiAutomaton population".into());
         }
+        if summary.env_bits != cli.observation_bytes * 8 {
+            return Err(format!(
+                "resume checkpoint uses {} observation bytes; pass --observation-bytes {}",
+                summary.env_bits / 8,
+                summary.env_bits / 8,
+            )
+            .into());
+        }
     }
 
     let loaded = load_wikitext_environment(
         &cli.dataset_name,
         &cli.dataset_config,
         &cli.dataset_split,
+        cli.observation_bytes,
         cli.dataset_path.as_deref(),
         cli.cache_dir.as_deref(),
     )?;
@@ -197,7 +210,8 @@ fn run_experiment(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         "dataset_path": cli.dataset_path.as_ref().map(|path| path.display().to_string()),
         "resolved_dataset_path": source_path,
         "automaton_params": {
-            "env_bits": 16,
+            "observation_bytes": cli.observation_bytes,
+            "env_bits": cli.observation_bytes * 8,
             "state_bits": runner_config.pop_config.state_bits,
             "resp_bits": 8,
             "num_clauses": tsetlin_clauses,
@@ -248,8 +262,19 @@ fn run_experiment(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn validate_cli(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
-    if !(1..=8).contains(&cli.state_bits) {
-        return Err("state-bits must be between 1 and 8".into());
+    if !(1..=7).contains(&cli.observation_bytes) {
+        return Err("observation-bytes must be between 1 and 7".into());
+    }
+    if cli.state_bits == 0 {
+        return Err("state-bits must be at least 1".into());
+    }
+    let state_bits = u16::from(cli.state_bits);
+    let observation_bits = u16::from(cli.observation_bytes) * 8;
+    if state_bits + 8 >= 64 {
+        return Err("state-bits + 8 prediction bits must be less than 64".into());
+    }
+    if state_bits + observation_bits >= 64 {
+        return Err("state-bits + observation bits must be less than 64".into());
     }
     if cli.pop_size < 2 {
         return Err("pop-size must be at least 2".into());
@@ -309,6 +334,7 @@ mod tests {
         assert_eq!(cli.restarts, 1);
         assert_eq!(cli.pop_size, 100);
         assert_eq!(cli.state_bits, 8);
+        assert_eq!(cli.observation_bytes, 2);
         assert_eq!(cli.tsetlin_clauses, 16);
         assert!(!cli.no_fingerprint);
         assert_eq!(cli.dataset_name, WIKITEXT_DATASET_NAME);
@@ -333,5 +359,53 @@ mod tests {
         assert_eq!(cli.dataset_path, Some(PathBuf::from("train.parquet")));
         assert_eq!(cli.resume, Some(PathBuf::from("checkpoint")));
         assert!(cli.no_fingerprint);
+    }
+
+    #[test]
+    fn cli_accepts_custom_wiki_widths() {
+        let cli = Cli::try_parse_from([
+            "wiki-runner",
+            "--name",
+            "test",
+            "--observation-bytes",
+            "4",
+            "--state-bits",
+            "16",
+            "--tsetlin-clauses",
+            "32",
+        ])
+        .unwrap();
+
+        validate_cli(&cli).unwrap();
+        assert_eq!(cli.observation_bytes, 4);
+        assert_eq!(cli.state_bits, 16);
+        assert_eq!(cli.tsetlin_clauses, 32);
+    }
+
+    #[test]
+    fn cli_rejects_widths_that_reach_sixty_four_bits() {
+        let output_too_wide = Cli::try_parse_from([
+            "wiki-runner",
+            "--name",
+            "test",
+            "--observation-bytes",
+            "1",
+            "--state-bits",
+            "56",
+        ])
+        .unwrap();
+        let input_too_wide = Cli::try_parse_from([
+            "wiki-runner",
+            "--name",
+            "test",
+            "--observation-bytes",
+            "2",
+            "--state-bits",
+            "48",
+        ])
+        .unwrap();
+
+        assert!(validate_cli(&output_too_wide).is_err());
+        assert!(validate_cli(&input_too_wide).is_err());
     }
 }

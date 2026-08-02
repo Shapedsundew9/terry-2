@@ -14,7 +14,8 @@ cargo run --release --bin wiki-runner -- \
 The defaults match `arc3_agi/wiki_runner.py`: 100 populations, 12 workers,
 1,000 generations, 1,000 ticks per generation, one restart, 100 automata per
 population, 8 state bits, 8 prediction bits, 16 Tsetlin clauses, and selection
-fingerprints enabled with 4 bits and a tournament size of 4.
+fingerprints enabled with 4 bits and a tournament size of 4. Each observation
+contains 2 bytes by default.
 
 Use smaller values for a smoke run:
 
@@ -28,6 +29,37 @@ cargo run --release --bin wiki-runner -- \
   --pop-size 4
 ```
 
+The observation width, internal-state width, and Tsetlin clause count are
+independent command-line sweep axes:
+
+```bash
+cargo run --release --bin wiki-runner -- \
+  --name wiki-observation4-state16-clauses32 \
+  --observation-bytes 4 \
+  --state-bits 16 \
+  --tsetlin-clauses 32
+```
+
+For a sequential unattended sweep, list the combinations in a shell loop. Run
+names must be unique because completed experiment names are skipped:
+
+```bash
+while read -r observation_bytes state_bits clauses; do
+  cargo run --release --bin wiki-runner -- \
+    --name "wiki-o${observation_bytes}-s${state_bits}-c${clauses}" \
+    --observation-bytes "$observation_bytes" \
+    --state-bits "$state_bits" \
+    --tsetlin-clauses "$clauses" \
+    --generations 50 \
+    --no-fingerprint
+done <<'EOF'
+1 8 8
+2 8 8
+3 8 8
+4 8 8
+EOF
+```
+
 `--database-url` overrides `DATABASE_URL`. Otherwise the runner uses the same
 local PostgreSQL default as `maze-runner`. Experiment names are unique: a
 completed name is skipped, a failed name is reclaimed, and an active name is
@@ -37,7 +69,7 @@ rejected.
 
 By default the runner downloads the single Parquet split from
 `Salesforce/wikitext`, config `wikitext-2-raw-v1`, split `train`. It validates
-the temporary Parquet file before atomically moving it into:cargo run --release --bin wiki-runner --
+the temporary Parquet file before atomically moving it into:
 
 ```text
 ${XDG_CACHE_HOME:-$HOME/.cache}/terry-2/wikitext/wikitext-2-raw-v1/train.parquet
@@ -59,11 +91,26 @@ newlines, are preserved.
 
 ## Prediction Semantics
 
-Each observation packs the previous and current bytes into 16 bits. At the
-first byte of a text, the observation contains only the current byte. The low
-8 output bits become the next internal state and the high 8 bits predict the
-next byte. The target after the final byte is the zero sentinel. Fitness is the
-fraction of correct predictions during the restart.
+`--observation-bytes N` packs the trailing window of up to `N` bytes ending at
+the current byte. The oldest available byte occupies the high bits and the
+current byte occupies the low 8 bits. Missing bytes at the start of a text are
+implicit high zeroes. For example, a 4-byte observation at `e` in `abcde` is
+the byte sequence `bcde`.
+
+The low `state_bits` output bits become the next internal state and the next 8
+bits predict the following byte. The target after the final byte is the zero
+sentinel. Fitness is the fraction of correct predictions during the restart.
+
+Widths use scalar `u64` values and must satisfy both strict limits:
+
+```text
+8 * observation_bytes + state_bits < 64
+state_bits + 8 < 64
+```
+
+`observation_bytes` must be between 1 and 7. `state_bits` must be at least 1
+and can be at most 55, subject to the selected observation width. Invalid
+combinations fail before a dataset is loaded or an experiment is created.
 
 Wiki runs intentionally expose only `GeneticCodeTsetlin`. A dense List code
 would allocate approximately 32 MiB per automaton for the 24-bit input space.
@@ -94,6 +141,13 @@ bytes and random-generator state are not embedded, so resume requires the same
 logical dataset and does not promise identical Python and Rust random streams.
 Rust continuation is repeatable for the same checkpoint, dataset, settings,
 and seed.
+
+Rust checkpoints record the effective environment, input, and output widths
+without changing schema version 1. Existing two-byte checkpoints remain
+loadable. A custom-width checkpoint must be resumed with the same
+`--observation-bytes` value; a mismatch fails with the required value. Python
+compatibility is retained for the default widths, but custom-width Python
+parity is outside the current scope.
 
 ## Benchmark
 

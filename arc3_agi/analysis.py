@@ -20,8 +20,8 @@ from plotly.subplots import make_subplots
 
 from arc3_agi.experiment import ExperimentStore, resolve_database_url
 
-EXPERIMENT_ID = 266  # <-- change me
-EXPERIMENT_IDS = [264, 265, EXPERIMENT_ID]  # <-- change me
+EXPERIMENT_ID = 304  # <-- change me
+EXPERIMENT_IDS = [302, 303, 304, EXPERIMENT_ID]  # <-- change me
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
 store = ExperimentStore(DATABASE_URL)

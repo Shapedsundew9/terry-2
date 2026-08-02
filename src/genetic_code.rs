@@ -81,11 +81,15 @@ impl GeneticCode {
     }
 
     #[inline]
-    pub fn get(&mut self, key: u32) -> u16 {
+    pub fn get(&mut self, key: u64) -> u64 {
         match self {
-            Self::Dict(code) => code.get(key),
-            Self::List(code) => code.get(key),
-            Self::Tsetlin(code) => code.evaluate(key as u64),
+            Self::Dict(code) => {
+                code.get(u32::try_from(key).expect("Dict key is outside u32")) as u64
+            }
+            Self::List(code) => {
+                code.get(u32::try_from(key).expect("List key is outside u32")) as u64
+            }
+            Self::Tsetlin(code) => code.evaluate(key),
         }
     }
 
@@ -386,8 +390,8 @@ impl GeneticCodeTsetlin {
         num_clauses: usize,
         input_bits: u8,
     ) -> Result<(), String> {
-        if !(1..=16).contains(&output_bits) {
-            return Err("Tsetlin output_bits must be between 1 and 16".into());
+        if !(1..=64).contains(&output_bits) {
+            return Err("Tsetlin output_bits must be between 1 and 64".into());
         }
         if num_clauses == 0 {
             return Err("Tsetlin num_clauses must be at least 1".into());
@@ -402,8 +406,8 @@ impl GeneticCodeTsetlin {
     }
 
     #[inline]
-    pub fn evaluate(&self, key: u64) -> u16 {
-        let mut output = 0u16;
+    pub fn evaluate(&self, key: u64) -> u64 {
+        let mut output = 0u64;
         for response_bit in 0..self.output_bits as usize {
             let start = response_bit * self.num_clauses;
             let end = start + self.num_clauses;
@@ -414,7 +418,7 @@ impl GeneticCodeTsetlin {
                 }
             }
             if votes >= self.threshold {
-                output |= 1u16 << response_bit;
+                output |= 1u64 << response_bit;
             }
         }
         output
@@ -674,11 +678,11 @@ mod tests {
     }
 
     #[test]
-    fn tsetlin_supports_16_output_bits() {
+    fn tsetlin_supports_64_output_bits() {
         let code =
-            GeneticCodeTsetlin::from_masks(vec![0; 16], vec![0; 16], 16, 1, 24, Some(7)).unwrap();
+            GeneticCodeTsetlin::from_masks(vec![0; 64], vec![0; 64], 64, 1, 24, Some(7)).unwrap();
 
-        assert_eq!(code.evaluate(0), u16::MAX);
+        assert_eq!(code.evaluate(0), u64::MAX);
     }
 
     #[test]

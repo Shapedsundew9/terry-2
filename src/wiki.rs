@@ -25,6 +25,7 @@ pub type WikiResult<T> = Result<T, Box<dyn Error>>;
 pub struct WikiEnvironment {
     pub name: String,
     texts: Vec<Vec<u8>>,
+    observation_bytes: u8,
 }
 
 #[derive(Clone, Debug)]
@@ -38,9 +39,9 @@ pub struct WikiAutomaton {
     pub text_index: usize,
     pub byte_index: usize,
     pub remaining_bytes: usize,
-    pub internal_state: u16,
+    pub internal_state: u64,
     pub state_bits: u8,
-    state_mask: u16,
+    state_mask: u64,
     pub right: u64,
     pub total: u64,
     pub fitness: f64,
@@ -53,7 +54,6 @@ pub struct WikiAutomaton {
 pub type WikiPopulation = PopulationCore<WikiAutomaton>;
 
 impl WikiAutomaton {
-    pub const ENV_BITS: u8 = 16;
     pub const RESPONSE_BITS: u8 = 8;
 
     pub fn new(
@@ -65,12 +65,12 @@ impl WikiAutomaton {
         if code_config.kind != GeneticCodeKind::Tsetlin {
             return Err("WikiAutomaton requires GeneticCodeTsetlin".into());
         }
-        validate_state_bits(state_bits)?;
+        validate_dimensions(state_bits, environment.observation_bits())?;
         let mut rng = Xoshiro256PlusPlus::seed_from_u64(seed);
         let genetic_code = GeneticCode::new(
             code_config,
             state_bits + Self::RESPONSE_BITS,
-            state_bits + Self::ENV_BITS,
+            state_bits + environment.observation_bits(),
             rng.next_u32() as u64,
         )?;
         Ok(Self::from_parts(
@@ -87,9 +87,14 @@ impl WikiAutomaton {
         state_bits: u8,
         seed: u64,
     ) -> Result<Self, String> {
-        validate_state_bits(state_bits)?;
+        validate_dimensions(state_bits, environment.observation_bits())?;
         if genetic_code.resp_bits() != state_bits + Self::RESPONSE_BITS {
             return Err("genetic-code output width does not match WikiAutomaton".into());
+        }
+        if genetic_code.as_tsetlin().is_some_and(|tsetlin| {
+            tsetlin.input_bits() != state_bits + environment.observation_bits()
+        }) {
+            return Err("genetic-code input width does not match WikiAutomaton".into());
         }
         let mut rng = Xoshiro256PlusPlus::seed_from_u64(seed);
         Ok(Self::from_parts(
@@ -114,7 +119,7 @@ impl WikiAutomaton {
             remaining_bytes: 0,
             internal_state: 0,
             state_bits,
-            state_mask: (1u16 << state_bits) - 1,
+            state_mask: (1u64 << state_bits) - 1,
             right: 0,
             total: 0,
             fitness: 0.0,
@@ -135,7 +140,7 @@ impl WikiAutomaton {
         }
 
         let observation = environment.observation(self.text_index, self.byte_index);
-        let input_code = ((self.internal_state as u32) << Self::ENV_BITS) | observation as u32;
+        let input_code = (self.internal_state << environment.observation_bits()) | observation;
         let output_code = self.genetic_code.get(input_code);
         self.internal_state = output_code & self.state_mask;
         let prediction = (output_code >> self.state_bits) as u8;
@@ -178,7 +183,7 @@ impl WikiAutomaton {
         seed: u64,
         text_index: usize,
         byte_index: usize,
-        internal_state: u16,
+        internal_state: u64,
         fitness: f64,
         last_action: i32,
         fingerprint: Option<SelectionFingerprint>,
@@ -202,9 +207,16 @@ impl WikiAutomaton {
     }
 }
 
-fn validate_state_bits(state_bits: u8) -> Result<(), String> {
-    if !(1..=8).contains(&state_bits) {
-        return Err("WikiAutomaton state_bits must be between 1 and 8".into());
+fn validate_dimensions(state_bits: u8, observation_bits: u8) -> Result<(), String> {
+    if state_bits == 0 {
+        return Err("WikiAutomaton state_bits must be at least 1".into());
+    }
+    let state_bits = u16::from(state_bits);
+    if state_bits + u16::from(WikiAutomaton::RESPONSE_BITS) >= 64 {
+        return Err("WikiAutomaton state_bits + response bits must be less than 64".into());
+    }
+    if state_bits + u16::from(observation_bits) >= 64 {
+        return Err("WikiAutomaton state_bits + observation bits must be less than 64".into());
     }
     Ok(())
 }
@@ -274,6 +286,17 @@ impl PopulationAutomaton for WikiAutomaton {
 
 impl WikiEnvironment {
     pub fn new(name: impl Into<String>, texts: Vec<Vec<u8>>) -> WikiResult<Self> {
+        Self::with_observation_bytes(name, texts, 2)
+    }
+
+    pub fn with_observation_bytes(
+        name: impl Into<String>,
+        texts: Vec<Vec<u8>>,
+        observation_bytes: u8,
+    ) -> WikiResult<Self> {
+        if !(1..=7).contains(&observation_bytes) {
+            return Err("Wiki observation_bytes must be between 1 and 7".into());
+        }
         let texts: Vec<Vec<u8>> = texts.into_iter().filter(|text| !text.is_empty()).collect();
         if texts.is_empty() {
             return Err("Wiki environment must contain at least one non-empty text".into());
@@ -281,10 +304,18 @@ impl WikiEnvironment {
         Ok(Self {
             name: name.into(),
             texts,
+            observation_bytes,
         })
     }
 
     pub fn from_parquet(path: &Path) -> WikiResult<Self> {
+        Self::from_parquet_with_observation_bytes(path, 2)
+    }
+
+    pub fn from_parquet_with_observation_bytes(
+        path: &Path,
+        observation_bytes: u8,
+    ) -> WikiResult<Self> {
         let file = File::open(path)?;
         let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
         let text_index = builder
@@ -314,21 +345,27 @@ impl WikiEnvironment {
             }
         }
 
-        Self::new("WikiEnv", texts)
+        Self::with_observation_bytes("WikiEnv", texts, observation_bytes)
     }
 
     pub fn texts(&self) -> &[Vec<u8>] {
         &self.texts
     }
 
-    pub fn observation(&self, text_index: usize, byte_index: usize) -> u16 {
+    pub fn observation_bytes(&self) -> u8 {
+        self.observation_bytes
+    }
+
+    pub fn observation_bits(&self) -> u8 {
+        self.observation_bytes * 8
+    }
+
+    pub fn observation(&self, text_index: usize, byte_index: usize) -> u64 {
         let text = &self.texts[text_index];
-        let current = text[byte_index] as u16;
-        if byte_index == 0 {
-            current
-        } else {
-            ((text[byte_index - 1] as u16) << 8) | current
-        }
+        let start = (byte_index + 1).saturating_sub(self.observation_bytes as usize);
+        text[start..=byte_index]
+            .iter()
+            .fold(0u64, |observation, byte| (observation << 8) | *byte as u64)
     }
 }
 
@@ -336,6 +373,7 @@ pub fn load_wikitext_environment(
     dataset_name: &str,
     dataset_config: &str,
     split: &str,
+    observation_bytes: u8,
     dataset_path: Option<&Path>,
     cache_root: Option<&Path>,
 ) -> WikiResult<LoadedWikiEnvironment> {
@@ -343,6 +381,7 @@ pub fn load_wikitext_environment(
         dataset_name,
         dataset_config,
         split,
+        observation_bytes,
         dataset_path,
         cache_root,
         HUGGING_FACE_DATASETS_URL,
@@ -353,13 +392,17 @@ fn load_wikitext_environment_from_base(
     dataset_name: &str,
     dataset_config: &str,
     split: &str,
+    observation_bytes: u8,
     dataset_path: Option<&Path>,
     cache_root: Option<&Path>,
     base_url: &str,
 ) -> WikiResult<LoadedWikiEnvironment> {
     if let Some(path) = dataset_path {
         return Ok(LoadedWikiEnvironment {
-            environment: WikiEnvironment::from_parquet(path)?,
+            environment: WikiEnvironment::from_parquet_with_observation_bytes(
+                path,
+                observation_bytes,
+            )?,
             source_path: path.to_path_buf(),
         });
     }
@@ -378,7 +421,7 @@ fn load_wikitext_environment_from_base(
         .join(format!("{split}.parquet"));
 
     if path.exists() {
-        match WikiEnvironment::from_parquet(&path) {
+        match WikiEnvironment::from_parquet_with_observation_bytes(&path, observation_bytes) {
             Ok(environment) => {
                 return Ok(LoadedWikiEnvironment {
                     environment,
@@ -392,7 +435,10 @@ fn load_wikitext_environment_from_base(
     let url = dataset_url(base_url, dataset_name, dataset_config, split)?;
     download_validated_parquet(&url, &path)?;
     Ok(LoadedWikiEnvironment {
-        environment: WikiEnvironment::from_parquet(&path)?,
+        environment: WikiEnvironment::from_parquet_with_observation_bytes(
+            &path,
+            observation_bytes,
+        )?,
         source_path: path,
     })
 }
@@ -533,10 +579,10 @@ mod tests {
             environment.texts(),
             &[b"a\n".to_vec(), "é".as_bytes().to_vec()]
         );
-        assert_eq!(environment.observation(0, 0), b'a' as u16);
+        assert_eq!(environment.observation(0, 0), b'a' as u64);
         assert_eq!(
             environment.observation(0, 1),
-            ((b'a' as u16) << 8) | b'\n' as u16
+            ((b'a' as u64) << 8) | b'\n' as u64
         );
         assert_eq!(environment.observation(1, 1), 0xc3a9);
     }
@@ -568,6 +614,7 @@ mod tests {
             WIKITEXT_DATASET_NAME,
             WIKITEXT_DATASET_CONFIG,
             WIKITEXT_SPLIT,
+            2,
             None,
             Some(&directory),
             &base_url,
@@ -578,6 +625,7 @@ mod tests {
             WIKITEXT_DATASET_NAME,
             WIKITEXT_DATASET_CONFIG,
             WIKITEXT_SPLIT,
+            2,
             None,
             Some(&directory),
             "http://127.0.0.1:1",
@@ -601,6 +649,7 @@ mod tests {
             "not/a/validated/name",
             "ignored/config",
             "ignored/split",
+            2,
             Some(&fixture),
             None,
             "not a URL",
@@ -649,6 +698,7 @@ mod tests {
             WIKITEXT_DATASET_NAME,
             WIKITEXT_DATASET_CONFIG,
             WIKITEXT_SPLIT,
+            2,
             None,
             Some(&directory),
             &format!("http://{address}"),
@@ -688,6 +738,55 @@ mod tests {
         assert_eq!(automaton.right, 3);
         assert_eq!(automaton.total, 3);
         assert_eq!(automaton.fitness, 1.0);
+    }
+
+    #[test]
+    fn observation_uses_configured_trailing_byte_window() {
+        let environment =
+            WikiEnvironment::with_observation_bytes("test", vec![b"abcde".to_vec()], 4).unwrap();
+
+        assert_eq!(environment.observation_bits(), 32);
+        assert_eq!(environment.observation(0, 0), 0x61);
+        assert_eq!(environment.observation(0, 2), 0x616263);
+        assert_eq!(environment.observation(0, 4), 0x62636465);
+    }
+
+    #[test]
+    fn automaton_supports_state_widths_above_sixteen_bits() {
+        let environment =
+            WikiEnvironment::with_observation_bytes("test", vec![b"a".to_vec()], 4).unwrap();
+        let genetic_code = GeneticCode::Tsetlin(
+            crate::genetic_code::GeneticCodeTsetlin::from_masks(
+                vec![0; 24],
+                vec![0; 24],
+                24,
+                1,
+                48,
+                Some(0),
+            )
+            .unwrap(),
+        );
+        let mut automaton = WikiAutomaton::with_code(genetic_code, &environment, 16, 0).unwrap();
+
+        assert_eq!(automaton.tick(&environment), u8::MAX);
+        assert_eq!(automaton.internal_state, u16::MAX as u64);
+    }
+
+    #[test]
+    fn automaton_rejects_dimensions_that_reach_sixty_four_bits() {
+        let one_byte =
+            WikiEnvironment::with_observation_bytes("test", vec![b"a".to_vec()], 1).unwrap();
+        let two_bytes = WikiEnvironment::new("test", vec![b"a".to_vec()]).unwrap();
+        let config = GeneticCodeConfig::default();
+
+        assert!(WikiAutomaton::new(&one_byte, 56, &config, 0)
+            .err()
+            .unwrap()
+            .contains("response bits"));
+        assert!(WikiAutomaton::new(&two_bytes, 48, &config, 0)
+            .err()
+            .unwrap()
+            .contains("observation bits"));
     }
 
     #[test]

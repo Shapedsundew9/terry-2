@@ -34,7 +34,7 @@ pub struct PopConfig {
     pub ticks_per_restart: usize,
     pub restarts_per_gen: usize,
     pub checkpoint_interval: usize,
-    pub mutation_rate: f64,
+    pub mutation_rate_exponent: u8,
     pub genetic_code: GeneticCodeConfig,
     pub fingerprint: Option<FingerprintConfig>,
 }
@@ -47,7 +47,7 @@ impl Default for PopConfig {
             ticks_per_restart: 100,
             restarts_per_gen: 20,
             checkpoint_interval: 0,
-            mutation_rate: 0.01,
+            mutation_rate_exponent: 7,
             genetic_code: GeneticCodeConfig::default(),
             fingerprint: None,
         }
@@ -295,7 +295,7 @@ impl<A: PopulationAutomaton> PopulationCore<A> {
         };
 
         let pool_len = pool_indices.len();
-        let mutation_rate = self.config.mutation_rate;
+        let mutation_rate_exponent = self.config.mutation_rate_exponent;
         let tournament_k = self
             .config
             .fingerprint
@@ -312,7 +312,7 @@ impl<A: PopulationAutomaton> PopulationCore<A> {
                 .genetic_code()
                 .crossover(
                     self.automata[p2_idx].genetic_code(),
-                    mutation_rate,
+                    mutation_rate_exponent,
                     &mut self.rng,
                 )
                 .expect("incompatible genetic-code parents");
@@ -481,7 +481,7 @@ mod tests {
                 ticks_per_restart: 2,
                 restarts_per_gen: 1,
                 checkpoint_interval: 0,
-                mutation_rate: 0.01,
+                mutation_rate_exponent: 7,
                 genetic_code: GeneticCodeConfig {
                     kind,
                     ..GeneticCodeConfig::default()

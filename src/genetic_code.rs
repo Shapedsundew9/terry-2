@@ -96,25 +96,25 @@ impl GeneticCode {
     pub fn crossover(
         &self,
         other: &Self,
-        mutation_rate: f64,
+        mutation_rate_exponent: u8,
         rng: &mut impl RngCore,
     ) -> Result<Self, String> {
-        if !mutation_rate.is_finite() || !(0.0..=1.0).contains(&mutation_rate) {
-            return Err("mutation_rate must be between 0 and 1 inclusive".into());
+        if mutation_rate_exponent > 64 {
+            return Err("mutation_rate_exponent must be between 0 and 64 inclusive".into());
         }
         match (self, other) {
             (Self::Dict(first), Self::Dict(second)) => Ok(Self::Dict(first.crossover_with_rng(
                 second,
-                mutation_rate,
+                mutation_rate_exponent,
                 rng,
             ))),
             (Self::List(first), Self::List(second)) => Ok(Self::List(first.crossover_with_rng(
                 second,
-                mutation_rate,
+                mutation_rate_exponent,
                 rng,
             ))),
             (Self::Tsetlin(first), Self::Tsetlin(second)) => Ok(Self::Tsetlin(
-                first.crossover_with_rng(second, mutation_rate, rng)?,
+                first.crossover_with_rng(second, mutation_rate_exponent, rng)?,
             )),
             _ => Err("genetic-code parents must use the same representation".into()),
         }
@@ -233,11 +233,11 @@ impl GeneticCodeDict {
     ///
     /// 1. Start with a clone of self's map.
     /// 2. For each key in `other`, overlay with 50 % probability.
-    /// 3. Apply geometric-gap bit-flip mutation (≈ `mutation_rate * n` flips).
+    /// 3. Apply geometric-gap bit-flip mutation with probability `2^-R`.
     fn crossover_with_rng<R: RngCore>(
         &self,
         other: &Self,
-        mutation_rate: f64,
+        mutation_rate_exponent: u8,
         rng: &mut R,
     ) -> Self {
         let mut child_map = self.map.clone();
@@ -250,10 +250,11 @@ impl GeneticCodeDict {
         }
 
         // Geometric-gap bit-flip mutation.
-        if mutation_rate > 0.0 && !child_map.is_empty() {
+        let mutation_probability = mutation_probability(mutation_rate_exponent);
+        if mutation_probability > 0.0 && !child_map.is_empty() {
             let keys: Vec<u32> = child_map.keys().cloned().collect();
             let n = keys.len();
-            let inv_log = 1.0_f64 / (1.0_f64 - mutation_rate).ln();
+            let inv_log = 1.0_f64 / (1.0_f64 - mutation_probability).ln();
             // First skip distance drawn from a geometric distribution.
             let u: f64 = (rng.next_u64() >> 11) as f64 * (1.0 / (1u64 << 53) as f64);
             let mut i = (u.ln() * inv_log) as usize;
@@ -427,9 +428,12 @@ impl GeneticCodeTsetlin {
     pub fn crossover_with_rng(
         &self,
         other: &Self,
-        mutation_rate: f64,
+        mutation_rate_exponent: u8,
         rng: &mut impl RngCore,
     ) -> Result<Self, String> {
+        if mutation_rate_exponent > 64 {
+            return Err("mutation_rate_exponent must be between 0 and 64 inclusive".into());
+        }
         if self.output_bits != other.output_bits {
             return Err("Tsetlin parents must have the same response bits".into());
         }
@@ -439,10 +443,6 @@ impl GeneticCodeTsetlin {
         if self.num_clauses != other.num_clauses {
             return Err("Tsetlin parents must have the same clause count".into());
         }
-        if !mutation_rate.is_finite() || !(0.0..=1.0).contains(&mutation_rate) {
-            return Err("mutation_rate must be between 0 and 1 inclusive".into());
-        }
-
         let len = self.output_bits as usize * self.num_clauses;
         let mut child_w_pos = Vec::with_capacity(len);
         let mut child_w_neg = Vec::with_capacity(len);
@@ -463,15 +463,13 @@ impl GeneticCodeTsetlin {
             }
         }
 
-        if mutation_rate > 0.0 {
-            mutate_tsetlin_masks(
-                &mut child_w_pos,
-                &mut child_w_neg,
-                self.input_bits,
-                mutation_rate,
-                rng,
-            );
-        }
+        mutate_tsetlin_masks(
+            &mut child_w_pos,
+            &mut child_w_neg,
+            self.input_bits,
+            mutation_rate_exponent,
+            rng,
+        );
 
         Self::from_masks(
             child_w_pos,
@@ -514,8 +512,13 @@ fn unit_f64<R: RngCore>(rng: &mut R) -> f64 {
 }
 
 #[inline]
-fn mutation_mask_depth(mutation_rate: f64) -> u32 {
-    ((-mutation_rate.log2()).round() as u32).min(64)
+fn mutation_probability(mutation_rate_exponent: u8) -> f64 {
+    2.0_f64.powi(-(mutation_rate_exponent as i32))
+}
+
+#[inline]
+fn mutation_mask_depth(mutation_rate_exponent: u8) -> u32 {
+    u32::from(mutation_rate_exponent).min(64)
 }
 
 #[inline]
@@ -523,7 +526,7 @@ fn mutate_tsetlin_masks(
     child_w_pos: &mut [u64],
     child_w_neg: &mut [u64],
     input_bits: u8,
-    mutation_rate: f64,
+    mutation_rate_exponent: u8,
     rng: &mut impl RngCore,
 ) {
     let input_mask = if input_bits == 64 {
@@ -531,7 +534,7 @@ fn mutate_tsetlin_masks(
     } else {
         (1u64 << input_bits) - 1
     };
-    let depth = mutation_mask_depth(mutation_rate);
+    let depth = mutation_mask_depth(mutation_rate_exponent);
 
     for (positive, negative) in child_w_pos.iter_mut().zip(child_w_neg) {
         let random_word = rng.next_u64();
@@ -608,7 +611,7 @@ impl GeneticCodeList {
     fn crossover_with_rng<R: RngCore>(
         &self,
         other: &Self,
-        mutation_rate: f64,
+        mutation_rate_exponent: u8,
         rng: &mut R,
     ) -> Self {
         let n = self.code.len();
@@ -626,8 +629,9 @@ impl GeneticCodeList {
         }
 
         // Geometric-gap mutation.
-        if mutation_rate > 0.0 && n > 0 {
-            let inv_log = 1.0_f64 / (1.0_f64 - mutation_rate).ln();
+        let mutation_probability = mutation_probability(mutation_rate_exponent);
+        if mutation_probability > 0.0 && n > 0 {
+            let inv_log = 1.0_f64 / (1.0_f64 - mutation_probability).ln();
             let u: f64 = (rng.next_u64() >> 11) as f64 * (1.0 / (1u64 << 53) as f64);
             let mut i = (u.ln() * inv_log) as usize;
             while i < n {
@@ -723,7 +727,7 @@ mod tests {
         let mut rng = Xoshiro256PlusPlus::seed_from_u64(9);
 
         let child = parent_a
-            .crossover_with_rng(&parent_b, 0.0, &mut rng)
+            .crossover_with_rng(&parent_b, 64, &mut rng)
             .unwrap();
 
         assert_eq!(child.num_clauses(), parent_a.num_clauses());
@@ -765,7 +769,7 @@ mod tests {
         .unwrap();
         let mut rng = Xoshiro256PlusPlus::seed_from_u64(4);
 
-        let child = parent.crossover_with_rng(&other, 1.0, &mut rng).unwrap();
+        let child = parent.crossover_with_rng(&other, 0, &mut rng).unwrap();
 
         assert_eq!(child.num_clauses(), parent.num_clauses());
         assert_eq!(child.threshold(), 2);
@@ -777,21 +781,20 @@ mod tests {
     }
 
     #[test]
-    fn tsetlin_mutation_rate_maps_to_nearest_power_of_two() {
-        assert_eq!(mutation_mask_depth(1.0), 0);
-        assert_eq!(mutation_mask_depth(0.5), 1);
-        assert_eq!(mutation_mask_depth(0.01), 7);
-        assert_eq!(mutation_mask_depth(0.001), 10);
+    fn tsetlin_mutation_rate_uses_exponent_directly() {
+        assert_eq!(mutation_mask_depth(0), 0);
+        assert_eq!(mutation_mask_depth(1), 1);
+        assert_eq!(mutation_mask_depth(7), 7);
+        assert_eq!(mutation_mask_depth(10), 10);
+        assert_eq!(mutation_mask_depth(64), 64);
+        assert_eq!(mutation_mask_depth(200), 64);
     }
 
     #[test]
-    fn tsetlin_rejects_invalid_mutation_rate() {
+    fn tsetlin_rejects_large_mutation_exponents() {
         let parent = GeneticCodeTsetlin::new(2, 2, 8, 1).unwrap();
         let mut rng = Xoshiro256PlusPlus::seed_from_u64(2);
-
-        for rate in [-0.01, 1.01, f64::NAN] {
-            assert!(parent.crossover_with_rng(&parent, rate, &mut rng).is_err());
-        }
+        assert!(parent.crossover_with_rng(&parent, 65, &mut rng).is_err());
     }
 
     #[test]
@@ -801,7 +804,7 @@ mod tests {
         let mut rng = Xoshiro256PlusPlus::seed_from_u64(3);
 
         let error = parent
-            .crossover_with_rng(&other, 0.0, &mut rng)
+            .crossover_with_rng(&other, 0, &mut rng)
             .err()
             .unwrap();
         assert!(error.contains("clause count"));

@@ -799,7 +799,7 @@ mod tests {
             ticks_per_restart: 3,
             restarts_per_gen: 1,
             checkpoint_interval: 0,
-            mutation_rate: 0.01,
+            mutation_rate_exponent: 7,
             genetic_code: GeneticCodeConfig {
                 kind: GeneticCodeKind::Tsetlin,
                 tsetlin_clauses: 2,

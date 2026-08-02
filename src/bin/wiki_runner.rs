@@ -79,8 +79,9 @@ struct Cli {
     #[arg(long, default_value_t = 1_000)]
     checkpoint_interval: usize,
 
-    #[arg(long, default_value_t = 0.01)]
-    mutation_rate: f64,
+    /// Genetic-code mutation exponent R where rate = 1 / (2^R).
+    #[arg(long, default_value_t = 7)]
+    mutation_rate: u8,
 
     /// Disable inherited selection fingerprints (enabled by default).
     #[arg(long)]
@@ -178,7 +179,7 @@ fn run_experiment(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         ticks_per_restart: cli.ticks,
         restarts_per_gen: cli.restarts,
         checkpoint_interval: cli.checkpoint_interval,
-        mutation_rate: cli.mutation_rate,
+        mutation_rate_exponent: cli.mutation_rate,
         genetic_code: GeneticCodeConfig {
             kind: GeneticCodeKind::Tsetlin,
             tsetlin_clauses,
@@ -203,7 +204,8 @@ fn run_experiment(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         "population_size": runner_config.pop_config.size,
         "population_seed": cli.pop_seed,
         "checkpoint_interval": cli.checkpoint_interval,
-        "mutation_rate": cli.mutation_rate,
+        "mutation_rate_exponent": cli.mutation_rate,
+        "mutation_rate": 2.0_f64.powi(-(cli.mutation_rate as i32)),
         "dataset_name": cli.dataset_name,
         "dataset_config": cli.dataset_config,
         "dataset_split": cli.dataset_split,
@@ -297,8 +299,8 @@ fn validate_cli(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     if cli.tsetlin_clauses == 0 {
         return Err("tsetlin-clauses must be at least 1".into());
     }
-    if !cli.mutation_rate.is_finite() || !(0.0..=1.0).contains(&cli.mutation_rate) {
-        return Err("mutation-rate must be between 0 and 1".into());
+    if cli.mutation_rate > 64 {
+        return Err("mutation-rate must be between 0 and 64".into());
     }
     if !cli.no_fingerprint {
         FingerprintConfig {

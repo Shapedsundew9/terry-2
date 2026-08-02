@@ -175,7 +175,7 @@ pub fn run_resumed_population(
             ticks_per_restart: cfg.pop_config.ticks_per_restart,
             restarts_per_gen: cfg.pop_config.restarts_per_gen,
             checkpoint_interval: cfg.checkpoint.generation_interval,
-            mutation_rate: cfg.pop_config.mutation_rate,
+            mutation_rate_exponent: cfg.pop_config.mutation_rate_exponent,
             seed: cfg.base_population_seed,
         },
     )?;
@@ -331,7 +331,7 @@ mod tests {
             ticks_per_restart: 4,
             restarts_per_gen: 1,
             checkpoint_interval: 0,
-            mutation_rate: 0.01,
+            mutation_rate_exponent: 7,
             genetic_code: GeneticCodeConfig::default(),
             fingerprint: None,
         };

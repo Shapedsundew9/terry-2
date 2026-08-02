@@ -85,7 +85,7 @@ pub struct ResumeConfig {
     pub ticks_per_restart: usize,
     pub restarts_per_gen: usize,
     pub checkpoint_interval: usize,
-    pub mutation_rate: f64,
+    pub mutation_rate_exponent: u8,
     pub seed: u64,
 }
 
@@ -145,8 +145,8 @@ pub fn load_population(
     maze: &Maze,
     resume: &ResumeConfig,
 ) -> Result<Population, Box<dyn std::error::Error>> {
-    if !resume.mutation_rate.is_finite() || !(0.0..=1.0).contains(&resume.mutation_rate) {
-        return Err(invalid_data("mutation_rate must be between 0 and 1").into());
+    if resume.mutation_rate_exponent > 64 {
+        return Err(invalid_data("mutation_rate_exponent must be between 0 and 64").into());
     }
     let stem = stem.with_extension("");
     let document: Value = toml::from_str(&std::fs::read_to_string(stem.with_extension("toml"))?)?;
@@ -387,7 +387,7 @@ pub fn load_population(
         ticks_per_restart: resume.ticks_per_restart,
         restarts_per_gen: resume.restarts_per_gen,
         checkpoint_interval: resume.checkpoint_interval,
-        mutation_rate: resume.mutation_rate,
+        mutation_rate_exponent: resume.mutation_rate_exponent,
         genetic_code: GeneticCodeConfig {
             kind,
             tsetlin_clauses: initial_clauses,
@@ -409,8 +409,8 @@ pub fn load_wiki_population(
     environment: &WikiEnvironment,
     resume: &ResumeConfig,
 ) -> Result<WikiPopulation, Box<dyn std::error::Error>> {
-    if !resume.mutation_rate.is_finite() || !(0.0..=1.0).contains(&resume.mutation_rate) {
-        return Err(invalid_data("mutation_rate must be between 0 and 1").into());
+    if resume.mutation_rate_exponent > 64 {
+        return Err(invalid_data("mutation_rate_exponent must be between 0 and 64").into());
     }
     let stem = stem.with_extension("");
     let document: Value = toml::from_str(&std::fs::read_to_string(stem.with_extension("toml"))?)?;
@@ -605,7 +605,7 @@ pub fn load_wiki_population(
         ticks_per_restart: resume.ticks_per_restart,
         restarts_per_gen: resume.restarts_per_gen,
         checkpoint_interval: resume.checkpoint_interval,
-        mutation_rate: resume.mutation_rate,
+        mutation_rate_exponent: resume.mutation_rate_exponent,
         genetic_code: GeneticCodeConfig {
             kind: GeneticCodeKind::Tsetlin,
             tsetlin_clauses: num_clauses.expect("non-empty automata checked above"),
@@ -1234,7 +1234,7 @@ mod tests {
             ticks_per_restart: 1,
             restarts_per_gen: 1,
             checkpoint_interval: 0,
-            mutation_rate: 0.01,
+            mutation_rate_exponent: 7,
             genetic_code: GeneticCodeConfig::default(),
             fingerprint: Some(FingerprintConfig {
                 bits: 4,
@@ -1309,7 +1309,7 @@ for automaton in population.automata:
                 ticks_per_restart: 1,
                 restarts_per_gen: 1,
                 checkpoint_interval: 0,
-                mutation_rate: 0.01,
+                mutation_rate_exponent: 7,
                 genetic_code: GeneticCodeConfig {
                     kind,
                     ..GeneticCodeConfig::default()
@@ -1367,7 +1367,7 @@ for name, expected in (("dict", GeneticCodeDict), ("list", GeneticCodeList)):
             ticks_per_restart: 2,
             restarts_per_gen: 1,
             checkpoint_interval: 0,
-            mutation_rate: 0.02,
+            mutation_rate_exponent: 6,
             genetic_code: GeneticCodeConfig::default(),
             fingerprint: Some(FingerprintConfig {
                 bits: 4,
@@ -1389,7 +1389,7 @@ for name, expected in (("dict", GeneticCodeDict), ("list", GeneticCodeList)):
                 ticks_per_restart: 2,
                 restarts_per_gen: 1,
                 checkpoint_interval: 0,
-                mutation_rate: 0.02,
+                mutation_rate_exponent: 6,
                 seed: 77,
             },
         )
@@ -1419,7 +1419,7 @@ for name, expected in (("dict", GeneticCodeDict), ("list", GeneticCodeList)):
             ticks_per_restart: 3,
             restarts_per_gen: 1,
             checkpoint_interval: 0,
-            mutation_rate: 0.01,
+            mutation_rate_exponent: 7,
             genetic_code: GeneticCodeConfig {
                 kind: GeneticCodeKind::Tsetlin,
                 tsetlin_clauses: 2,
@@ -1441,7 +1441,7 @@ for name, expected in (("dict", GeneticCodeDict), ("list", GeneticCodeList)):
             ticks_per_restart: 3,
             restarts_per_gen: 1,
             checkpoint_interval: 0,
-            mutation_rate: 0.01,
+            mutation_rate_exponent: 7,
             seed: 123,
         };
         let restored = load_wiki_population(&stem, &environment, &resume).unwrap();
@@ -1467,7 +1467,7 @@ for name, expected in (("dict", GeneticCodeDict), ("list", GeneticCodeList)):
             ticks_per_restart: 3,
             restarts_per_gen: 1,
             checkpoint_interval: 0,
-            mutation_rate: 0.01,
+            mutation_rate_exponent: 7,
             genetic_code: GeneticCodeConfig {
                 kind: GeneticCodeKind::Tsetlin,
                 tsetlin_clauses: 2,
@@ -1585,7 +1585,7 @@ population.save(Path({stem:?}))
                 ticks_per_restart: 3,
                 restarts_per_gen: 1,
                 checkpoint_interval: 0,
-                mutation_rate: 0.01,
+                mutation_rate_exponent: 7,
                 seed: 123,
             },
         )
@@ -1611,7 +1611,7 @@ population.save(Path({stem:?}))
             ticks_per_restart: 1,
             restarts_per_gen: 1,
             checkpoint_interval: 0,
-            mutation_rate: 0.01,
+            mutation_rate_exponent: 7,
             genetic_code: GeneticCodeConfig {
                 tsetlin_clauses: 5,
                 ..GeneticCodeConfig::default()
@@ -1657,7 +1657,7 @@ population.save(Path({stem:?}))
                 ticks_per_restart: 1,
                 restarts_per_gen: 1,
                 checkpoint_interval: 0,
-                mutation_rate: 0.01,
+                mutation_rate_exponent: 7,
                 seed: 88,
             },
         )
@@ -1685,7 +1685,7 @@ population.save(Path({stem:?}))
                 ticks_per_restart: 1,
                 restarts_per_gen: 1,
                 checkpoint_interval: 0,
-                mutation_rate: 0.01,
+                mutation_rate_exponent: 7,
                 seed: 1234,
             },
         )

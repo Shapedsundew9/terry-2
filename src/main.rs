@@ -101,9 +101,9 @@ struct Cli {
     #[arg(long, default_value_t = 4)]
     tsetlin_clauses: usize,
 
-    /// Per-bit mutation rate for crossover.
-    #[arg(long, default_value_t = 0.01)]
-    mutation_rate: f64,
+    /// Genetic-code mutation exponent R where rate = 1 / (2^R).
+    #[arg(long, default_value_t = 7)]
+    mutation_rate: u8,
 
     /// Enable inherited selection fingerprints.
     #[arg(long, default_value_t = false)]
@@ -170,7 +170,7 @@ fn run_experiment(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         ticks_per_restart: cli.ticks,
         restarts_per_gen: cli.restarts,
         checkpoint_interval: cli.checkpoint_interval,
-        mutation_rate: cli.mutation_rate,
+        mutation_rate_exponent: cli.mutation_rate,
         genetic_code: GeneticCodeConfig {
             kind: code_kind,
             tsetlin_clauses: cli.tsetlin_clauses,
@@ -206,7 +206,8 @@ fn run_experiment(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         "maze_name": maze_name,
         "population_seed": cli.pop_seed,
         "checkpoint_interval": cli.checkpoint_interval,
-        "mutation_rate": cli.mutation_rate,
+        "mutation_rate_exponent": cli.mutation_rate,
+        "mutation_rate": 2.0_f64.powi(-(cli.mutation_rate as i32)),
         "automaton_params": {
             "state_bits": resume_summary.as_ref().map_or(cli.state_bits, |summary| summary.state_bits)
         },
@@ -275,8 +276,8 @@ fn validate_cli(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     if cli.side_length_bits < 4 {
         return Err("side-length-bits must be at least 4".into());
     }
-    if !cli.mutation_rate.is_finite() || !(0.0..=1.0).contains(&cli.mutation_rate) {
-        return Err("mutation-rate must be between 0 and 1".into());
+    if cli.mutation_rate > 64 {
+        return Err("mutation-rate must be between 0 and 64".into());
     }
     if cli.tsetlin_clauses == 0 {
         return Err("tsetlin-clauses must be at least 1".into());

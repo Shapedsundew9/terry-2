@@ -8,6 +8,11 @@ echo "--- Running post-create script ---"
 sudo apt update -y
 sudo apt upgrade -y
 sudo apt install -y ripgrep vim python3.13-venv python3-pip docker.io
+sudo apt install -y curl ca-certificates gnupg2 lsb-release
+sudo apt install -y postgresql-common
+sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh
+sudo apt install -y postgresql postgresql-contrib
+sudo pg_ctlcluster $(ls /etc/postgresql/) main start
 
 # Install anti-gravity
 if [ ! -f /home/vscode/.local/bin/agy ]; then

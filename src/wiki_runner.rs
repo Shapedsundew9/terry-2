@@ -33,7 +33,7 @@ impl Default for WikiRunnerConfig {
                 ticks_per_restart: 1_000,
                 restarts_per_gen: 1,
                 checkpoint_interval: 1_000,
-                mutation_rate: 0.01,
+                mutation_rate_exponent: 7,
                 genetic_code: GeneticCodeConfig {
                     kind: GeneticCodeKind::Tsetlin,
                     tsetlin_clauses: 16,
@@ -98,7 +98,7 @@ pub fn run_resumed_population(
             ticks_per_restart: config.pop_config.ticks_per_restart,
             restarts_per_gen: config.pop_config.restarts_per_gen,
             checkpoint_interval: config.checkpoint.generation_interval,
-            mutation_rate: config.pop_config.mutation_rate,
+            mutation_rate_exponent: config.pop_config.mutation_rate_exponent,
             seed: config.base_population_seed,
         },
     )?;
@@ -165,7 +165,7 @@ mod tests {
                 ticks_per_restart: 3,
                 restarts_per_gen: 1,
                 checkpoint_interval: 0,
-                mutation_rate: 0.01,
+                mutation_rate_exponent: 7,
                 genetic_code: GeneticCodeConfig {
                     kind: GeneticCodeKind::Tsetlin,
                     tsetlin_clauses: 2,

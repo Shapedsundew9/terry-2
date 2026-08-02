@@ -29,7 +29,7 @@ pub struct SelectionFingerprint {
 }
 
 impl SelectionFingerprint {
-    pub fn random(bits: u8, rng: &mut dyn RngCore) -> Self {
+    pub fn random(bits: u8, rng: &mut impl RngCore) -> Self {
         Self::with_value(bits, rng.next_u64())
     }
 
@@ -57,7 +57,7 @@ impl SelectionFingerprint {
         (self.value ^ other.value).count_ones()
     }
 
-    pub fn crossover(&self, other: &Self, rng: &mut dyn RngCore) -> Self {
+    pub fn crossover(&self, other: &Self, rng: &mut impl RngCore) -> Self {
         let selector = rng.next_u64();
         Self::with_value(
             self.bits,
@@ -65,19 +65,19 @@ impl SelectionFingerprint {
         )
     }
 
-    pub fn mutate(&mut self, mutation_rate: f64, rng: &mut dyn RngCore) {
+    pub fn mutate(&mut self, mutation_rate: f64, rng: &mut impl RngCore) {
         if mutation_rate > 0.0 && unit_f64(rng) < mutation_rate {
             self.value ^= 1u64 << random_index(rng, self.bits as usize);
         }
     }
 
-    pub fn flip_toward(&mut self, other: &Self, rng: &mut dyn RngCore) {
+    pub fn flip_toward(&mut self, other: &Self, rng: &mut impl RngCore) {
         if let Some(bit) = random_set_bit(self.value ^ other.value, rng) {
             self.value ^= 1u64 << bit;
         }
     }
 
-    pub fn flip_away(&mut self, other: &Self, rng: &mut dyn RngCore) {
+    pub fn flip_away(&mut self, other: &Self, rng: &mut impl RngCore) {
         let mask = if self.bits == 64 {
             u64::MAX
         } else {
@@ -89,7 +89,7 @@ impl SelectionFingerprint {
     }
 }
 
-fn random_set_bit(mask: u64, rng: &mut dyn RngCore) -> Option<u32> {
+fn random_set_bit(mask: u64, rng: &mut impl RngCore) -> Option<u32> {
     let count = mask.count_ones();
     if count == 0 {
         return None;
@@ -107,24 +107,24 @@ fn random_set_bit(mask: u64, rng: &mut dyn RngCore) -> Option<u32> {
 }
 
 #[inline]
-fn unit_f64(rng: &mut dyn RngCore) -> f64 {
+fn unit_f64(rng: &mut impl RngCore) -> f64 {
     (rng.next_u64() >> 11) as f64 * (1.0 / (1u64 << 53) as f64)
 }
 
 #[inline]
-fn random_index(rng: &mut dyn RngCore, upper: usize) -> usize {
+fn random_index(rng: &mut impl RngCore, upper: usize) -> usize {
     (rng.next_u64() as usize) % upper
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rand::rngs::StdRng;
     use rand::SeedableRng;
+    use rand_xoshiro::Xoshiro256PlusPlus;
 
     #[test]
     fn toward_and_away_change_hamming_by_one() {
-        let mut rng = StdRng::seed_from_u64(1);
+        let mut rng = Xoshiro256PlusPlus::seed_from_u64(1);
         let other = SelectionFingerprint::with_value(8, 0b0000_1111);
         let mut toward = SelectionFingerprint::with_value(8, 0b1111_1111);
         let before = toward.hamming(&other);
@@ -138,7 +138,7 @@ mod tests {
 
     #[test]
     fn forced_mutation_flips_one_bit() {
-        let mut rng = StdRng::seed_from_u64(2);
+        let mut rng = Xoshiro256PlusPlus::seed_from_u64(2);
         let mut fingerprint = SelectionFingerprint::with_value(8, 0b1010_1010);
         let original = fingerprint.value();
         fingerprint.mutate(1.0, &mut rng);

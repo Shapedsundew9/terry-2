@@ -808,7 +808,10 @@ fn build_toml(pop: &Population, maze: &Maze) -> Table {
                     "input_bits".into(),
                     Value::Integer(tsetlin.input_bits() as i64),
                 );
-                gc_table.insert("threshold".into(), Value::Float(tsetlin.threshold()));
+                gc_table.insert(
+                    "threshold".into(),
+                    Value::Integer(tsetlin.threshold() as i64),
+                );
             }
 
             let mut at = Table::new();
@@ -938,7 +941,10 @@ fn build_wiki_toml(pop: &WikiPopulation, environment: &WikiEnvironment) -> Table
                 "input_bits".into(),
                 Value::Integer(tsetlin.input_bits() as i64),
             );
-            genetic_code.insert("threshold".into(), Value::Float(tsetlin.threshold()));
+            genetic_code.insert(
+                "threshold".into(),
+                Value::Integer(tsetlin.threshold() as i64),
+            );
             if let Some(seed) = code.code_seed() {
                 genetic_code.insert("seed".into(), Value::Integer(seed as i64));
             }
@@ -1254,7 +1260,7 @@ for automaton in population.automata:
     assert isinstance(automaton.genetic_code, GeneticCodeTsetlin)
     assert automaton.genetic_code._w_pos.shape == (6, 4)
     assert automaton.genetic_code._w_neg.shape == (6, 4)
-    assert automaton.genetic_code.threshold == 3.0
+    assert automaton.genetic_code.threshold == 3
     assert automaton.fingerprint is not None
 "#,
             stem = stem.display().to_string()
@@ -1601,7 +1607,7 @@ population.save(Path({stem:?}))
         assert_eq!(code.output_bits(), 6);
         assert_eq!(code.num_clauses(), 5);
         assert_eq!(code.input_bits(), 64);
-        assert_eq!(code.threshold(), 3.0);
+        assert_eq!(code.threshold(), 3);
     }
 
     #[test]

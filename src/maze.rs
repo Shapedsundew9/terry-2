@@ -1,4 +1,3 @@
-use rand::rngs::StdRng;
 /// Maze generation and environment.
 ///
 /// Implements iterative DFS (recursive-backtracker) on an odd-index cell
@@ -7,6 +6,7 @@ use rand::rngs::StdRng;
 /// (x, y, orientation) triple so each automaton tick is a single array
 /// lookup.
 use rand::{RngCore, SeedableRng};
+use rand_xoshiro::Xoshiro256PlusPlus;
 
 /// Orientation constants (same order as Python's `Boolean2DGrid.Orientation`).
 pub const UP: u8 = 0;
@@ -87,7 +87,7 @@ fn orientation_offsets(ori: u8) -> [(i32, i32); 9] {
 pub fn generate_maze(side_length_bits: u8, seed: u64) -> MazeLayout {
     assert!(side_length_bits >= 4, "side_length_bits must be >= 4");
     let side = 1usize << side_length_bits;
-    let mut rng = StdRng::seed_from_u64(seed);
+    let mut rng = Xoshiro256PlusPlus::seed_from_u64(seed);
 
     // All walls initially.
     let mut wall = vec![true; side * side];
@@ -221,7 +221,7 @@ impl Maze {
     }
 
     /// Pick a random free cell using a raw RNG.
-    pub fn random_free_cell(&self, rng: &mut dyn RngCore) -> (usize, usize) {
+    pub fn random_free_cell(&self, rng: &mut impl RngCore) -> (usize, usize) {
         self.free[(rng.next_u64() as usize) % self.free.len()]
     }
 }

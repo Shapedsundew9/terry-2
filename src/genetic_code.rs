@@ -1,4 +1,3 @@
-use rand::rngs::StdRng;
 /// Genetic code representations.
 ///
 /// Provides a `GeneticCode` trait with two implementations:
@@ -8,6 +7,7 @@ use rand::rngs::StdRng;
 /// Mirrors the Python `GeneticCode` / `GeneticCodeDict` / `GeneticCodeList`
 /// hierarchy, keeping the same crossover algorithm and checkpoint semantics.
 use rand::{RngCore, SeedableRng};
+use rand_xoshiro::Xoshiro256PlusPlus;
 use std::collections::HashMap;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -93,7 +93,7 @@ impl GeneticCode {
         &self,
         other: &Self,
         mutation_rate: f64,
-        rng: &mut dyn RngCore,
+        rng: &mut impl RngCore,
     ) -> Result<Self, String> {
         if !mutation_rate.is_finite() || !(0.0..=1.0).contains(&mutation_rate) {
             return Err("mutation_rate must be between 0 and 1 inclusive".into());
@@ -180,7 +180,7 @@ pub struct GeneticCodeDict {
     /// Optional seed stored for checkpoint round-trips.
     seed: Option<u64>,
     /// RNG used for lazy-fill value generation.
-    cold_rng: Box<StdRng>,
+    cold_rng: Box<Xoshiro256PlusPlus>,
 }
 
 impl GeneticCodeDict {
@@ -191,7 +191,7 @@ impl GeneticCodeDict {
             output_bits,
             output_mask: packed_output_mask(output_bits),
             seed: Some(seed),
-            cold_rng: Box::new(StdRng::seed_from_u64(seed)),
+            cold_rng: Box::new(Xoshiro256PlusPlus::seed_from_u64(seed)),
         }
     }
 
@@ -199,7 +199,7 @@ impl GeneticCodeDict {
     #[allow(dead_code)]
     pub fn from_entries(entries: Vec<(u32, u16)>, output_bits: u8, seed: Option<u64>) -> Self {
         let map: HashMap<u32, u16> = entries.into_iter().collect();
-        let cold_rng = Box::new(StdRng::seed_from_u64(seed.unwrap_or(0)));
+        let cold_rng = Box::new(Xoshiro256PlusPlus::seed_from_u64(seed.unwrap_or(0)));
         GeneticCodeDict {
             map,
             output_bits,
@@ -230,7 +230,12 @@ impl GeneticCodeDict {
     /// 1. Start with a clone of self's map.
     /// 2. For each key in `other`, overlay with 50 % probability.
     /// 3. Apply geometric-gap bit-flip mutation (≈ `mutation_rate * n` flips).
-    fn crossover_with_rng(&self, other: &Self, mutation_rate: f64, rng: &mut dyn RngCore) -> Self {
+    fn crossover_with_rng<R: RngCore>(
+        &self,
+        other: &Self,
+        mutation_rate: f64,
+        rng: &mut R,
+    ) -> Self {
         let mut child_map = self.map.clone();
 
         // Overlay entries from other parent with 50 % probability.
@@ -265,7 +270,7 @@ impl GeneticCodeDict {
             output_bits: self.output_bits,
             output_mask: self.output_mask,
             seed: Some(child_seed),
-            cold_rng: Box::new(StdRng::seed_from_u64(child_seed)),
+            cold_rng: Box::new(Xoshiro256PlusPlus::seed_from_u64(child_seed)),
         }
     }
 }
@@ -287,7 +292,7 @@ pub struct GeneticCodeTsetlin {
     output_bits: u8,
     num_clauses: usize,
     input_bits: u8,
-    threshold: f64,
+    threshold: usize,
     seed: Option<u64>,
 }
 
@@ -299,12 +304,12 @@ impl GeneticCodeTsetlin {
         seed: u64,
     ) -> Result<Self, String> {
         Self::validate_dimensions(output_bits, num_clauses, input_bits)?;
-        let threshold = (num_clauses / 2 + 1) as f64;
+        let threshold = num_clauses / 2 + 1;
 
         let len = output_bits as usize * num_clauses;
         let mut w_pos = vec![0u64; len];
         let mut w_neg = vec![0u64; len];
-        let mut rng = StdRng::seed_from_u64(seed);
+        let mut rng = Xoshiro256PlusPlus::seed_from_u64(seed);
 
         // Match Python's 5% active-literal distribution: 95% ignored,
         // 2.5% required true, and 2.5% required false.
@@ -371,7 +376,7 @@ impl GeneticCodeTsetlin {
             output_bits,
             num_clauses,
             input_bits,
-            threshold: (num_clauses / 2 + 1) as f64,
+            threshold: num_clauses / 2 + 1,
             seed,
         })
     }
@@ -408,7 +413,7 @@ impl GeneticCodeTsetlin {
                     votes += 1;
                 }
             }
-            if votes as f64 >= self.threshold {
+            if votes >= self.threshold {
                 output |= 1u16 << response_bit;
             }
         }
@@ -419,13 +424,16 @@ impl GeneticCodeTsetlin {
         &self,
         other: &Self,
         mutation_rate: f64,
-        rng: &mut dyn RngCore,
+        rng: &mut impl RngCore,
     ) -> Result<Self, String> {
         if self.output_bits != other.output_bits {
             return Err("Tsetlin parents must have the same response bits".into());
         }
         if self.input_bits != other.input_bits {
             return Err("Tsetlin parents must have the same input bits".into());
+        }
+        if self.num_clauses != other.num_clauses {
+            return Err("Tsetlin parents must have the same clause count".into());
         }
         if !mutation_rate.is_finite() || !(0.0..=1.0).contains(&mutation_rate) {
             return Err("mutation_rate must be between 0 and 1 inclusive".into());
@@ -438,39 +446,27 @@ impl GeneticCodeTsetlin {
         for response_bit in 0..self.output_bits as usize {
             let self_start = response_bit * self.num_clauses;
             let other_start = response_bit * other.num_clauses;
-            for _ in 0..self.num_clauses {
-                let (source, source_start, source_len) = if unit_f64(rng) < 0.5 {
-                    (self, self_start, self.num_clauses)
+            for clause_index in 0..self.num_clauses {
+                if (rng.next_u32() & 1) == 0 {
+                    let source_index = self_start + clause_index;
+                    child_w_pos.push(self.w_pos[source_index]);
+                    child_w_neg.push(self.w_neg[source_index]);
                 } else {
-                    (other, other_start, other.num_clauses)
-                };
-                let source_index = source_start + random_index(rng, source_len);
-                child_w_pos.push(source.w_pos[source_index]);
-                child_w_neg.push(source.w_neg[source_index]);
+                    let source_index = other_start + clause_index;
+                    child_w_pos.push(other.w_pos[source_index]);
+                    child_w_neg.push(other.w_neg[source_index]);
+                }
             }
         }
 
         if mutation_rate > 0.0 {
-            for index in 0..len {
-                if unit_f64(rng) >= mutation_rate {
-                    continue;
-                }
-                let bit = random_index(rng, self.input_bits as usize) as u8;
-                let mask = 1u64 << bit;
-                let was_positive = child_w_pos[index] & mask != 0;
-                let was_negative = child_w_neg[index] & mask != 0;
-                let alternative = (rng.next_u32() & 1) as u8;
-
-                child_w_pos[index] &= !mask;
-                child_w_neg[index] &= !mask;
-                match (was_positive, was_negative, alternative) {
-                    (false, false, 0) => child_w_pos[index] |= mask,
-                    (false, false, 1) => child_w_neg[index] |= mask,
-                    (true, false, 1) => child_w_neg[index] |= mask,
-                    (false, true, 1) => child_w_pos[index] |= mask,
-                    _ => {}
-                }
-            }
+            mutate_tsetlin_masks(
+                &mut child_w_pos,
+                &mut child_w_neg,
+                self.input_bits,
+                mutation_rate,
+                rng,
+            );
         }
 
         Self::from_masks(
@@ -495,7 +491,7 @@ impl GeneticCodeTsetlin {
         self.input_bits
     }
 
-    pub fn threshold(&self) -> f64 {
+    pub fn threshold(&self) -> usize {
         self.threshold
     }
 
@@ -509,13 +505,44 @@ impl GeneticCodeTsetlin {
 }
 
 #[inline]
-fn unit_f64(rng: &mut dyn RngCore) -> f64 {
+fn unit_f64<R: RngCore>(rng: &mut R) -> f64 {
     (rng.next_u64() >> 11) as f64 * (1.0 / (1u64 << 53) as f64)
 }
 
 #[inline]
-fn random_index(rng: &mut dyn RngCore, upper: usize) -> usize {
-    (rng.next_u64() as usize) % upper
+fn mutation_mask_depth(mutation_rate: f64) -> u32 {
+    ((-mutation_rate.log2()).round() as u32).min(64)
+}
+
+#[inline]
+fn mutate_tsetlin_masks(
+    child_w_pos: &mut [u64],
+    child_w_neg: &mut [u64],
+    input_bits: u8,
+    mutation_rate: f64,
+    rng: &mut impl RngCore,
+) {
+    let input_mask = if input_bits == 64 {
+        u64::MAX
+    } else {
+        (1u64 << input_bits) - 1
+    };
+    let depth = mutation_mask_depth(mutation_rate);
+
+    for (positive, negative) in child_w_pos.iter_mut().zip(child_w_neg) {
+        let random_word = rng.next_u64();
+        let mut mutation_mask = if depth == 0 { u64::MAX } else { random_word };
+        // Reuse rotated bits to obtain a 2^-depth marginal rate with one RNG word.
+        for shift in 1..depth {
+            mutation_mask &= random_word.rotate_left(shift);
+        }
+        mutation_mask &= input_mask;
+
+        let candidates = mutation_mask & !(*positive | *negative);
+        let positive_additions = candidates & rng.next_u64();
+        *positive = (*positive & !mutation_mask) | positive_additions;
+        *negative = (*negative & !mutation_mask) | (candidates ^ positive_additions);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -539,7 +566,7 @@ impl GeneticCodeList {
     /// Create a fully pre-allocated list of `size` entries.
     #[allow(dead_code)]
     pub fn new(size: usize, output_bits: u8, seed: u64) -> Self {
-        let mut rng = StdRng::seed_from_u64(seed);
+        let mut rng = Xoshiro256PlusPlus::seed_from_u64(seed);
         let mask = packed_output_mask(output_bits);
         let code: Vec<u16> = (0..size).map(|_| (rng.next_u32() as u16) & mask).collect();
         GeneticCodeList {
@@ -574,7 +601,12 @@ impl GeneticCodeList {
             .collect()
     }
 
-    fn crossover_with_rng(&self, other: &Self, mutation_rate: f64, rng: &mut dyn RngCore) -> Self {
+    fn crossover_with_rng<R: RngCore>(
+        &self,
+        other: &Self,
+        mutation_rate: f64,
+        rng: &mut R,
+    ) -> Self {
         let n = self.code.len();
         let mut child: Vec<u16> = Vec::with_capacity(n);
 
@@ -656,7 +688,7 @@ mod tests {
 
         assert_eq!(first.positive_masks(), second.positive_masks());
         assert_eq!(first.negative_masks(), second.negative_masks());
-        assert_eq!(first.threshold(), 3.0);
+        assert_eq!(first.threshold(), 3);
         assert!(first
             .positive_masks()
             .iter()
@@ -676,15 +708,15 @@ mod tests {
         )
         .unwrap();
         let parent_b = GeneticCodeTsetlin::from_masks(
-            vec![10, 20, 40, 80],
-            vec![1, 1, 1, 1],
+            vec![10, 20, 40, 80, 7, 11],
+            vec![1, 1, 1, 1, 16, 32],
             2,
-            2,
+            3,
             8,
             Some(2),
         )
         .unwrap();
-        let mut rng = StdRng::seed_from_u64(9);
+        let mut rng = Xoshiro256PlusPlus::seed_from_u64(9);
 
         let child = parent_a
             .crossover_with_rng(&parent_b, 0.0, &mut rng)
@@ -692,16 +724,17 @@ mod tests {
 
         assert_eq!(child.num_clauses(), parent_a.num_clauses());
         for response_bit in 0..child.output_bits() as usize {
-            let mut parent_pairs = Vec::new();
-            for parent in [&parent_a, &parent_b] {
-                let start = response_bit * parent.num_clauses();
-                for index in start..start + parent.num_clauses() {
-                    parent_pairs.push((parent.w_pos[index], parent.w_neg[index]));
-                }
-            }
+            let a_start = response_bit * parent_a.num_clauses();
+            let b_start = response_bit * parent_b.num_clauses();
             let child_start = response_bit * child.num_clauses();
-            for index in child_start..child_start + child.num_clauses() {
-                assert!(parent_pairs.contains(&(child.w_pos[index], child.w_neg[index])));
+            for clause_index in 0..child.num_clauses() {
+                let child_index = child_start + clause_index;
+                let a_index = a_start + clause_index;
+                let b_index = b_start + clause_index;
+                let child_pair = (child.w_pos[child_index], child.w_neg[child_index]);
+                let a_pair = (parent_a.w_pos[a_index], parent_a.w_neg[a_index]);
+                let b_pair = (parent_b.w_pos[b_index], parent_b.w_neg[b_index]);
+                assert!(child_pair == a_pair || child_pair == b_pair);
             }
         }
     }
@@ -717,30 +750,57 @@ mod tests {
             Some(1),
         )
         .unwrap();
-        let other =
-            GeneticCodeTsetlin::from_masks(vec![0, 0, 0, 0], vec![0, 0, 0, 0], 2, 2, 8, Some(2))
-                .unwrap();
-        let mut rng = StdRng::seed_from_u64(4);
+        let other = GeneticCodeTsetlin::from_masks(
+            vec![0, 0, 0, 0, 0, 0],
+            vec![0, 0, 0, 0, 0, 0],
+            2,
+            3,
+            8,
+            Some(2),
+        )
+        .unwrap();
+        let mut rng = Xoshiro256PlusPlus::seed_from_u64(4);
 
         let child = parent.crossover_with_rng(&other, 1.0, &mut rng).unwrap();
 
         assert_eq!(child.num_clauses(), parent.num_clauses());
-        assert_eq!(child.threshold(), 2.0);
+        assert_eq!(child.threshold(), 2);
         for (positive, negative) in child.w_pos.iter().zip(&child.w_neg) {
             assert_eq!(positive & negative, 0);
             let literals = positive | negative;
-            assert_eq!(literals.count_ones(), 1);
+            assert_eq!(literals, 0xff);
         }
+    }
+
+    #[test]
+    fn tsetlin_mutation_rate_maps_to_nearest_power_of_two() {
+        assert_eq!(mutation_mask_depth(1.0), 0);
+        assert_eq!(mutation_mask_depth(0.5), 1);
+        assert_eq!(mutation_mask_depth(0.01), 7);
+        assert_eq!(mutation_mask_depth(0.001), 10);
     }
 
     #[test]
     fn tsetlin_rejects_invalid_mutation_rate() {
         let parent = GeneticCodeTsetlin::new(2, 2, 8, 1).unwrap();
-        let mut rng = StdRng::seed_from_u64(2);
+        let mut rng = Xoshiro256PlusPlus::seed_from_u64(2);
 
         for rate in [-0.01, 1.01, f64::NAN] {
             assert!(parent.crossover_with_rng(&parent, rate, &mut rng).is_err());
         }
+    }
+
+    #[test]
+    fn tsetlin_rejects_mismatched_clause_count() {
+        let parent = GeneticCodeTsetlin::new(2, 3, 8, 1).unwrap();
+        let other = GeneticCodeTsetlin::new(2, 2, 8, 2).unwrap();
+        let mut rng = Xoshiro256PlusPlus::seed_from_u64(3);
+
+        let error = parent
+            .crossover_with_rng(&other, 0.0, &mut rng)
+            .err()
+            .unwrap();
+        assert!(error.contains("clause count"));
     }
 
     #[test]

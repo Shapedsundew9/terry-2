@@ -1,6 +1,6 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use rand::rngs::StdRng;
 use rand::SeedableRng;
+use rand_xoshiro::Xoshiro256PlusPlus;
 use rust_2::genetic_code::GeneticCodeTsetlin;
 
 fn benchmark_tsetlin(c: &mut Criterion) {
@@ -15,7 +15,7 @@ fn benchmark_tsetlin(c: &mut Criterion) {
 
     let other = GeneticCodeTsetlin::new(6, 4, 13, 43).unwrap();
     c.bench_function("tsetlin_crossover_6x4", |b| {
-        let mut rng = StdRng::seed_from_u64(44);
+        let mut rng = Xoshiro256PlusPlus::seed_from_u64(44);
         b.iter(|| {
             black_box(
                 code.crossover_with_rng(&other, black_box(0.01), &mut rng)
@@ -35,7 +35,7 @@ fn benchmark_tsetlin(c: &mut Criterion) {
 
     let wiki_other = GeneticCodeTsetlin::new(16, 16, 24, 46).unwrap();
     c.bench_function("tsetlin_crossover_16x16_wiki", |b| {
-        let mut rng = StdRng::seed_from_u64(47);
+        let mut rng = Xoshiro256PlusPlus::seed_from_u64(47);
         b.iter(|| {
             black_box(
                 wiki_code

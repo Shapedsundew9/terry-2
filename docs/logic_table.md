@@ -98,7 +98,36 @@ y = Y_base | B_y
 
 ```
 
-#### Why this is more efficient:
+### Dense power-of-two mutation masks
+
+The Tsetlin implementation applies this transition to every literal selected by
+a dense mutation mask. A positive requested rate is rounded to the nearest
+supported probability:
+
+```text
+k = round(-log2(mutation_rate))
+effective_rate = 2^-k
+```
+
+For example, `0.01` maps to `1/128`. One random machine word can generate the
+mask without drawing `k` independent words:
+
+```text
+Q = random_word()
+M = Q & rotate(Q, 1) & ... & rotate(Q, k - 1) & input_mask
+```
+
+Each bit in `M` has marginal probability `2^-k` because it depends on `k`
+distinct uniformly random bits. Reusing `Q` makes mutation selections at
+different positions spatially correlated; this is intentional in exchange for
+using one RNG word per clause mask. A second independent random word supplies
+the `?` direction choice for all selected ignored literals.
+
+This dense approach has fixed work per clause and no data-dependent branches in
+the state transition. Sparse geometric sampling can still be faster at very low
+rates because it skips unselected clauses entirely.
+
+#### Why this is more efficient
 
 * **`not_M`**: Inverting **M** once allows us to cleanly erase the target bit from both **X** and **Y** using a single AND (`&`) operation each.
 * **De Morgan's Law (`nor_XY`)**: Instead of calculating `~X & ~Y` (which takes 3 operations), we calculate `~(X | Y)` (which takes 2). This gives us a mask showing everywhere both strings are 0.

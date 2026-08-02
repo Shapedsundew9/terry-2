@@ -15,6 +15,7 @@ from arc3_agi.genetic_code import (
     GeneticCodeDict,
     GeneticCodeList,
     GeneticCodeTsetlin,
+    _mutation_mask_depth,
 )
 
 RESP_BITS = 6
@@ -120,6 +121,16 @@ def test_tsetlin_defaults_to_four_clauses_with_strict_majority() -> None:
     assert code.threshold == 3
 
 
+@pytest.mark.parametrize(
+    ("mutation_rate", "depth"),
+    [(1.0, 0), (0.5, 1), (0.01, 7), (0.001, 10)],
+)
+def test_tsetlin_mutation_rate_maps_to_nearest_power_of_two(
+    mutation_rate: float, depth: int
+) -> None:
+    assert _mutation_mask_depth(mutation_rate) == depth
+
+
 def test_tsetlin_crossover_is_reproducible_and_inherits_whole_clauses() -> None:
     parent1 = _make_tsetlin(
         [[1, 2, 4], [8, 16, 32]],
@@ -132,8 +143,8 @@ def test_tsetlin_crossover_is_reproducible_and_inherits_whole_clauses() -> None:
         seed=41,
     )
     parent2 = _make_tsetlin(
-        [[10, 20], [40, 80]],
-        [[1, 1], [1, 1]],
+        [[10, 20, 40], [80, 7, 11]],
+        [[1, 1, 1], [1, 16, 32]],
         seed=99,
     )
 
@@ -145,20 +156,23 @@ def test_tsetlin_crossover_is_reproducible_and_inherits_whole_clauses() -> None:
     assert np.array_equal(child._w_pos, duplicate._w_pos)
     assert np.array_equal(child._w_neg, duplicate._w_neg)
     for response_bit in range(child.resp_bits):
-        parent_clauses = {
-            (int(pos), int(neg))
-            for parent in (parent1, parent2)
-            for pos, neg in zip(
-                parent._w_pos[response_bit], parent._w_neg[response_bit]
+        for clause_index in range(child.num_clauses):
+            child_pair = (
+                int(child._w_pos[response_bit, clause_index]),
+                int(child._w_neg[response_bit, clause_index]),
             )
-        }
-        assert all(
-            (int(pos), int(neg)) in parent_clauses
-            for pos, neg in zip(child._w_pos[response_bit], child._w_neg[response_bit])
-        )
+            parent1_pair = (
+                int(parent1._w_pos[response_bit, clause_index]),
+                int(parent1._w_neg[response_bit, clause_index]),
+            )
+            parent2_pair = (
+                int(parent2._w_pos[response_bit, clause_index]),
+                int(parent2._w_neg[response_bit, clause_index]),
+            )
+            assert child_pair in (parent1_pair, parent2_pair)
 
 
-def test_tsetlin_forced_mutation_changes_one_valid_literal_per_clause() -> None:
+def test_tsetlin_forced_mutation_changes_every_valid_literal_per_clause() -> None:
     parent1 = _make_tsetlin(
         [[0, 0, 0], [0, 0, 0]],
         [[0, 0, 0], [0, 0, 0]],
@@ -166,8 +180,8 @@ def test_tsetlin_forced_mutation_changes_one_valid_literal_per_clause() -> None:
         input_bits=8,
     )
     parent2 = _make_tsetlin(
-        [[0, 0], [0, 0]],
-        [[0, 0], [0, 0]],
+        [[0, 0, 0], [0, 0, 0]],
+        [[0, 0, 0], [0, 0, 0]],
         seed=8,
         input_bits=8,
     )
@@ -178,8 +192,7 @@ def test_tsetlin_forced_mutation_changes_one_valid_literal_per_clause() -> None:
     assert child.threshold == 2
     assert np.all((child._w_pos & child._w_neg) == 0)
     literal_masks = child._w_pos | child._w_neg
-    assert np.all(literal_masks != 0)
-    assert np.all((literal_masks & (literal_masks - np.uint64(1))) == 0)
+    assert np.all(literal_masks == np.uint64(0xFF))
 
 
 def test_tsetlin_mutation_preserves_single_clause() -> None:
@@ -219,4 +232,8 @@ def test_tsetlin_crossover_rejects_incompatible_parent() -> None:
     with pytest.raises(ValueError, match="input bits"):
         parent.crossover(
             GeneticCodeTsetlin(seed=2, resp_bits=2, num_clauses=2, input_bits=7)
+        )
+    with pytest.raises(ValueError, match="clause count"):
+        parent.crossover(
+            GeneticCodeTsetlin(seed=2, resp_bits=2, num_clauses=3, input_bits=8)
         )

@@ -5,8 +5,8 @@
 /// and mutation to produce the next generation.
 use std::time::Instant;
 
-use rand::rngs::StdRng;
 use rand::{RngCore, SeedableRng};
+use rand_xoshiro::Xoshiro256PlusPlus;
 
 use crate::automaton::MazeAutomaton;
 use crate::fingerprint::{FingerprintConfig, SelectionFingerprint};
@@ -144,7 +144,7 @@ pub struct PopulationCore<A: PopulationAutomaton> {
     pub generation: usize,
     pub tick_count: u64,
     pub fitness_history: Vec<GenerationStats>,
-    rng: StdRng,
+    rng: Xoshiro256PlusPlus,
     pub config: PopConfig,
     gen_start: Instant,
     next_individual_id: u64,
@@ -182,7 +182,7 @@ impl<A: PopulationAutomaton> PopulationCore<A> {
             generation,
             tick_count,
             fitness_history,
-            rng: StdRng::seed_from_u64(seed),
+            rng: Xoshiro256PlusPlus::seed_from_u64(seed),
             config,
             gen_start: Instant::now(),
             next_individual_id,
@@ -192,7 +192,7 @@ impl<A: PopulationAutomaton> PopulationCore<A> {
 
     /// Create a new population seeded from `seed`.
     pub fn new(environment: &A::Environment, config: PopConfig, seed: u64) -> Self {
-        let mut rng = StdRng::seed_from_u64(seed);
+        let mut rng = Xoshiro256PlusPlus::seed_from_u64(seed);
         if let Some(fingerprint) = &config.fingerprint {
             fingerprint
                 .validate()

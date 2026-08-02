@@ -1,9 +1,9 @@
-use rand::rngs::StdRng;
 /// MazeAutomaton — Mealy-machine automaton that navigates a maze.
 ///
 /// Mirrors the Python `MazeAutomaton` / `AutomatonISBase` / `AutomatonBase`
 /// hierarchy in a single flat struct for performance.
 use rand::{RngCore, SeedableRng};
+use rand_xoshiro::Xoshiro256PlusPlus;
 
 use crate::fingerprint::SelectionFingerprint;
 use crate::genetic_code::{GeneticCode, GeneticCodeConfig};
@@ -52,7 +52,7 @@ pub struct MazeAutomaton {
     pub fingerprint: Option<SelectionFingerprint>,
 
     // --- Automaton RNG (for reset random placement) ---
-    rng: StdRng,
+    rng: Xoshiro256PlusPlus,
 }
 
 impl MazeAutomaton {
@@ -63,7 +63,7 @@ impl MazeAutomaton {
         code_config: &GeneticCodeConfig,
         seed: u64,
     ) -> Result<Self, String> {
-        let mut rng = StdRng::seed_from_u64(seed);
+        let mut rng = Xoshiro256PlusPlus::seed_from_u64(seed);
         let code_seed = rng.next_u32() as u64;
         let output_bits = state_bits + 2; // state_bits + resp_bits
         let input_bits = state_bits + 9; // state_bits + env_bits
@@ -73,7 +73,7 @@ impl MazeAutomaton {
 
     /// Create a new automaton with a supplied genetic code (for offspring).
     pub fn with_code(genetic_code: GeneticCode, maze: &Maze, state_bits: u8, seed: u64) -> Self {
-        let mut rng = StdRng::seed_from_u64(seed);
+        let mut rng = Xoshiro256PlusPlus::seed_from_u64(seed);
         Self::from_parts(genetic_code, maze, state_bits, &mut rng)
     }
 
@@ -123,7 +123,7 @@ impl MazeAutomaton {
         genetic_code: GeneticCode,
         maze: &Maze,
         state_bits: u8,
-        rng: &mut StdRng,
+        rng: &mut Xoshiro256PlusPlus,
     ) -> Self {
         let env_bits: u8 = 9;
         let resp_bits: u8 = 2;
@@ -135,7 +135,7 @@ impl MazeAutomaton {
         let orientation = (rng.next_u32() & 3) as u8;
         let grid_size = maze.width * maze.height;
 
-        let automaton_rng = StdRng::seed_from_u64(rng.next_u64());
+        let automaton_rng = Xoshiro256PlusPlus::seed_from_u64(rng.next_u64());
 
         MazeAutomaton {
             id: 0,

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from abc import abstractmethod
 from collections.abc import Mapping, MutableMapping
-from math import log
+from math import log, log2
 from random import Random
 from typing import Any, Callable, Iterator, Self, Sequence
 
@@ -15,6 +15,12 @@ from arc3_agi.checkpoint import SCHEMA_VERSION, Checkpointable
 # Precompute powers of 2 for packing boolean results into an integer
 _POWERS = asarray([1 << i for i in range(64)], dtype=uint64)
 UINT64_ZERO = uint64(0)
+UINT64_MAX = uint64(2**64 - 1)
+
+
+def _mutation_mask_depth(mutation_rate: float) -> int:
+    """Map a positive mutation rate to the nearest ``1 / 2**depth``."""
+    return min(64, max(0, int(-log2(mutation_rate) + 0.5)))
 
 
 class GeneticCode(MutableMapping[int, int], Checkpointable):
@@ -357,17 +363,17 @@ class GeneticCodeTsetlin(GeneticCode):
         return isinstance(key, int) and 0 <= key < self.input_bits
 
     def crossover(self, other: GeneticCode, mutation_rate: float = 0.01) -> Self:
-        """Combine two unordered clause pools and mutate the resulting child.
+        """Combine aligned clause roles from two parents and then mutate.
 
-        Each positive/negative mask pair is inherited atomically from a random
-        clause in either parent. Parents may have different clause counts, but
-        must agree on input and response widths. Each child clause independently
-        has one literal changed to either of its other two valid states: ignored,
-        required true, or required false.
+        For each response-bit and clause index, the child inherits one complete
+        positive/negative clause pair from exactly one parent at that same index.
+        This preserves clause-role alignment across generations. Parents must
+        agree on input width, response width, and clause count. Each literal has
+        the nearest supported power-of-two probability of mutating to one of its
+        other two valid states.
 
         The first parent's seeded NumPy generator owns all random choices. Its
-        The first parent's fixed clause count and strict-majority threshold are
-        preserved.
+        fixed clause count and strict-majority threshold are preserved.
         """
         if not isinstance(other, GeneticCodeTsetlin):
             raise TypeError(
@@ -378,6 +384,8 @@ class GeneticCodeTsetlin(GeneticCode):
             raise ValueError("Tsetlin parents must have the same response bits.")
         if self.input_bits != other.input_bits:
             raise ValueError("Tsetlin parents must have the same input bits.")
+        if self.num_clauses != other.num_clauses:
+            raise ValueError("Tsetlin parents must have the same clause count.")
         if not 0.0 <= mutation_rate <= 1.0:
             raise ValueError("mutation_rate must be between 0 and 1 inclusive.")
         if self.num_clauses < 1 or other.num_clauses < 1:
@@ -387,53 +395,48 @@ class GeneticCodeTsetlin(GeneticCode):
 
         rng = self._np_rng
         shape = (self.resp_bits, self.num_clauses)
-        response_indices = array(range(self.resp_bits), dtype=int64)[:, None]
-        self_clause_indices = rng.integers(self.num_clauses, size=shape)
-        other_clause_indices = rng.integers(other.num_clauses, size=shape)
         inherit_other = rng.random(shape) < 0.5
 
         child_w_pos = where(
             inherit_other,
-            other._w_pos[response_indices, other_clause_indices],
-            self._w_pos[response_indices, self_clause_indices],
+            other._w_pos,
+            self._w_pos,
         ).astype(uint64, copy=True)
         child_w_neg = where(
             inherit_other,
-            other._w_neg[response_indices, other_clause_indices],
-            self._w_neg[response_indices, self_clause_indices],
+            other._w_neg,
+            self._w_neg,
         ).astype(uint64, copy=True)
 
         if mutation_rate > 0.0:
-            mutation_rows, mutation_columns = (
-                rng.random(shape) < mutation_rate
-            ).nonzero()
-            mutation_count = len(mutation_rows)
-            if mutation_count:
-                mutation_bits = rng.integers(self.input_bits, size=mutation_count)
-                alternative_states = rng.integers(2, size=mutation_count)
-                bit_masks = uint64(1) << mutation_bits.astype(uint64, copy=False)
+            input_mask = (
+                UINT64_MAX
+                if self.input_bits == 64
+                else uint64((1 << self.input_bits) - 1)
+            )
+            depth = _mutation_mask_depth(mutation_rate)
+            random_words = rng.integers(
+                0, UINT64_MAX, size=shape, dtype=uint64, endpoint=True
+            )
+            if depth == 0:
+                mutation_masks = zeros(shape, dtype=uint64)
+                mutation_masks.fill(input_mask)
+            else:
+                mutation_masks = random_words.copy()
+                for shift in range(1, depth):
+                    mutation_masks &= (random_words << uint64(shift)) | (
+                        random_words >> uint64(64 - shift)
+                    )
+                mutation_masks &= input_mask
 
-                selected_pos = child_w_pos[mutation_rows, mutation_columns].copy()
-                selected_neg = child_w_neg[mutation_rows, mutation_columns].copy()
-                was_positive = (selected_pos & bit_masks) != 0
-                was_negative = (selected_neg & bit_masks) != 0
-
-                keep_mask = ~bit_masks
-                selected_pos &= keep_mask
-                selected_neg &= keep_mask
-
-                # Incremental transitions for a targeted literal:
-                # positive/negative -> ignored, and ignored -> positive/negative.
-                choose_alt_one = alternative_states == 1
-                was_ignored = ~was_positive & ~was_negative
-                set_positive = was_ignored & ~choose_alt_one
-                set_negative = was_ignored & choose_alt_one
-
-                selected_pos |= where(set_positive, bit_masks, UINT64_ZERO)
-                selected_neg |= where(set_negative, bit_masks, UINT64_ZERO)
-
-                child_w_pos[mutation_rows, mutation_columns] = selected_pos
-                child_w_neg[mutation_rows, mutation_columns] = selected_neg
+            candidates = mutation_masks & ~(child_w_pos | child_w_neg)
+            positive_additions = candidates & rng.integers(
+                0, UINT64_MAX, size=shape, dtype=uint64, endpoint=True
+            )
+            child_w_pos &= ~mutation_masks
+            child_w_neg &= ~mutation_masks
+            child_w_pos |= positive_additions
+            child_w_neg |= candidates ^ positive_additions
 
         return self.__class__(
             code=(child_w_pos, child_w_neg),

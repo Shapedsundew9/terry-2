@@ -7,8 +7,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use arrow_array::{Array, StringArray};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-use rand::rngs::StdRng;
 use rand::{RngCore, SeedableRng};
+use rand_xoshiro::Xoshiro256PlusPlus;
 
 use crate::fingerprint::SelectionFingerprint;
 use crate::genetic_code::{GeneticCode, GeneticCodeConfig, GeneticCodeKind};
@@ -47,7 +47,7 @@ pub struct WikiAutomaton {
     pub last_action: i32,
     pub genetic_code: GeneticCode,
     pub fingerprint: Option<SelectionFingerprint>,
-    rng: StdRng,
+    rng: Xoshiro256PlusPlus,
 }
 
 pub type WikiPopulation = PopulationCore<WikiAutomaton>;
@@ -66,7 +66,7 @@ impl WikiAutomaton {
             return Err("WikiAutomaton requires GeneticCodeTsetlin".into());
         }
         validate_state_bits(state_bits)?;
-        let mut rng = StdRng::seed_from_u64(seed);
+        let mut rng = Xoshiro256PlusPlus::seed_from_u64(seed);
         let genetic_code = GeneticCode::new(
             code_config,
             state_bits + Self::RESPONSE_BITS,
@@ -91,7 +91,7 @@ impl WikiAutomaton {
         if genetic_code.resp_bits() != state_bits + Self::RESPONSE_BITS {
             return Err("genetic-code output width does not match WikiAutomaton".into());
         }
-        let mut rng = StdRng::seed_from_u64(seed);
+        let mut rng = Xoshiro256PlusPlus::seed_from_u64(seed);
         Ok(Self::from_parts(
             genetic_code,
             environment,
@@ -104,7 +104,7 @@ impl WikiAutomaton {
         genetic_code: GeneticCode,
         environment: &WikiEnvironment,
         state_bits: u8,
-        rng: &mut StdRng,
+        rng: &mut Xoshiro256PlusPlus,
     ) -> Self {
         debug_assert!(!environment.texts().is_empty());
         Self {
@@ -121,7 +121,7 @@ impl WikiAutomaton {
             last_action: -1,
             genetic_code,
             fingerprint: None,
-            rng: StdRng::seed_from_u64(rng.next_u64()),
+            rng: Xoshiro256PlusPlus::seed_from_u64(rng.next_u64()),
         }
     }
 

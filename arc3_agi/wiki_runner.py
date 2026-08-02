@@ -29,7 +29,7 @@ MAX_PARALLEL: int = 12
 TOTAL_POPULATIONS: int = 100
 """Total number of populations to run in pool mode."""
 
-MAX_GENERATIONS: int = 1000
+MAX_GENERATIONS: int = 100
 """Number of evaluate/evolve cycles for each population."""
 
 TICKS_PER_RESTART: int = 1000
@@ -293,7 +293,7 @@ def run_experiment(
 def main() -> None:
     """Run the default tracked WikiText baseline."""
     run_experiment(
-        name="wikitext2-baseline-state8-tsetlin",
+        name="wikitext2-baseline-state8-tsetlin-3",
         params=default_experiment_params(),
         description="Baseline WikiText 2 byte-prediction evolution run.",
     )

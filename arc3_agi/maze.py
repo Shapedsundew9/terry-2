@@ -420,6 +420,8 @@ class MazeAutomaton(AutomatonISBase):
 
     def tick(self) -> int:
         """Perform a tick of the automaton."""
+        if not self.is_active:
+            return self.last_action
         # super().tick() already updates internal_state and returns only the action bytes.
         action = super().tick()
         self.energy -= 1  # Each tick costs 1 energy; can be tuned.

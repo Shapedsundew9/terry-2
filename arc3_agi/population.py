@@ -89,16 +89,9 @@ class Population(Checkpointable):
             self._run_dir = None
 
     def tick(self) -> None:
-        """Perform a tick for all automata using batched environment observation.
-
-        Automata whose ``is_active`` property returns False are skipped — they
-        have exhausted their energy budget and would only waste CPU.  They
-        remain in the population list and their accumulated fitness is used
-        normally at the next ``evolve()`` call.
-        """
+        """Perform one tick for every automaton in the population."""
         for automaton in self.automata:
-            if automaton.is_active:
-                automaton.tick()
+            automaton.tick()
         self.tick_count += 1
 
     def run_generation(self, ticks_per_restart: int, restarts_per_gen: int = 1) -> None:

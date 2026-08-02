@@ -119,3 +119,20 @@ def test_move_forward_into_free_cell_succeeds_and_rewards() -> None:
                 assert auto.fitness > fitness_before
                 return
     pytest.fail("no pair of adjacent free cells found in the maze")
+
+
+def test_maze_automaton_stops_ticking_after_energy_is_exhausted() -> None:
+    maze = Maze("m", 4, seed=1)
+    auto = MazeAutomaton(environment=maze)
+
+    auto.energy = 0
+    coords_before = list(auto.coords)
+    fitness_before = auto.fitness
+    last_action_before = auto.last_action
+
+    action = auto.tick()
+
+    assert action == last_action_before
+    assert auto.energy == 0
+    assert auto.coords == coords_before
+    assert auto.fitness == fitness_before

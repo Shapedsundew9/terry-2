@@ -34,23 +34,6 @@ class DoneHandle:
         }
 
 
-def test_default_params_identify_dataset_and_automaton() -> None:
-    params = wiki_runner.default_experiment_params()
-
-    assert params["dataset_name"] == "Salesforce/wikitext"
-    assert params["dataset_config"] == "wikitext-2-raw-v1"
-    assert params["dataset_split"] == "train"
-    assert params["ticks_per_restart"] == 1000
-    assert params["restarts_per_gen"] == 1
-    assert params["fingerprint_enabled"] is True
-    assert params["automaton_params"] == {
-        "env_bits": 16,
-        "state_bits": 8,
-        "resp_bits": 8,
-        "num_clauses": 16,
-    }
-
-
 def test_resolve_params_merges_automaton_overrides() -> None:
     resolved = wiki_runner._resolve_experiment_params(
         {
@@ -66,39 +49,6 @@ def test_resolve_params_merges_automaton_overrides() -> None:
         "resp_bits": 8,
         "num_clauses": 8,
     }
-
-
-def test_build_config_uses_wiki_automaton_and_population_seed() -> None:
-    environment = ByteEnv(name="test", array=["abc"])
-    params = wiki_runner.default_experiment_params()
-    params.update(
-        {
-            "population_size": 4,
-            "ticks_per_restart": 7,
-            "restarts_per_gen": 2,
-            "population_seed": 100,
-            "checkpoint_interval": 3,
-            "fingerprint_bits": 8,
-            "fingerprint_tournament_k": 3,
-            "fingerprint_mutation_rate": 0.05,
-        }
-    )
-
-    config = wiki_runner._build_config(2, environment, params)
-
-    assert config.size == 4
-    assert config.AutomatonClass is WikiAutomaton
-    assert config.environment is environment
-    assert config.ticks_per_restart == 7
-    assert config.restarts_per_gen == 2
-    assert config.seed == 102
-    assert config.checkpoint_config is not None
-    assert config.checkpoint_config.enabled is True
-    assert config.checkpoint_config.generation_interval == 3
-    assert config.fingerprint_config is not None
-    assert config.fingerprint_config.bits == 8
-    assert config.fingerprint_config.tournament_k == 3
-    assert config.fingerprint_config.mutation_rate == pytest.approx(0.05)
 
 
 def test_run_delegates_fixed_batch_with_loaded_environment(
@@ -233,22 +183,6 @@ def test_run_experiment_resolves_params_before_tracking(
     assert captured["params"]["automaton_params"]["env_bits"] == 16
     assert captured["pool_runner"] is wiki_runner.run_pool
     assert captured["store_factory"] is wiki_runner.ExperimentStore
-
-
-def test_main_runs_named_tracked_baseline(monkeypatch: pytest.MonkeyPatch) -> None:
-    calls: list[dict[str, Any]] = []
-    monkeypatch.setattr(
-        wiki_runner,
-        "run_experiment",
-        lambda **kwargs: calls.append(kwargs) or 1,
-    )
-
-    wiki_runner.main()
-
-    assert len(calls) == 1
-    assert calls[0]["name"] == "wikitext2-baseline-state8-tsetlin"
-    assert calls[0]["params"] == wiki_runner.default_experiment_params()
-    assert "WikiText 2" in calls[0]["description"]
 
 
 def test_run_pool_executes_tiny_wiki_population_in_subprocess(

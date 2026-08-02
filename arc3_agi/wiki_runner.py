@@ -29,7 +29,7 @@ MAX_PARALLEL: int = 12
 TOTAL_POPULATIONS: int = 100
 """Total number of populations to run in pool mode."""
 
-MAX_GENERATIONS: int = 100
+MAX_GENERATIONS: int = 40
 """Number of evaluate/evolve cycles for each population."""
 
 TICKS_PER_RESTART: int = 1000
@@ -44,7 +44,7 @@ POPULATION_SIZE: int = 100
 POPULATION_SEED: int | None = 0
 """Base deterministic seed; population i receives this value plus i."""
 
-FINGERPRINT_ENABLED: bool = True
+FINGERPRINT_ENABLED: bool = False
 """Whether to enable fingerprint-guided mate selection."""
 
 FINGERPRINT_BITS: int = 4
@@ -60,7 +60,7 @@ AUTOMATON_PARAMS: dict[str, Any] = {
     "env_bits": 16,
     "state_bits": 8,
     "resp_bits": 8,
-    "num_clauses": 16,
+    "num_clauses": 8,
 }
 """Keyword arguments forwarded to each Wiki automaton."""
 
@@ -293,7 +293,7 @@ def run_experiment(
 def main() -> None:
     """Run the default tracked WikiText baseline."""
     run_experiment(
-        name="wikitext2-baseline-state8-tsetlin-3",
+        name="wikitext2-baseline-state8-tsetlin-x",
         params=default_experiment_params(),
         description="Baseline WikiText 2 byte-prediction evolution run.",
     )

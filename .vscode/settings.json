@@ -4,5 +4,11 @@
         "arc3_agi"
     ],
     "python.testing.unittestEnabled": false,
-    "python.testing.pytestEnabled": true
+    "python.testing.pytestEnabled": true,
+    "dictation.enabled": false,
+    "remote.extensionKind": {
+        "ms-vscode.vscode-speech": [
+            "ui"
+        ]
+    }
 }

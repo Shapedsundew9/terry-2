@@ -37,7 +37,7 @@ rejected.
 
 By default the runner downloads the single Parquet split from
 `Salesforce/wikitext`, config `wikitext-2-raw-v1`, split `train`. It validates
-the temporary Parquet file before atomically moving it into:
+the temporary Parquet file before atomically moving it into:cargo run --release --bin wiki-runner --
 
 ```text
 ${XDG_CACHE_HOME:-$HOME/.cache}/terry-2/wikitext/wikitext-2-raw-v1/train.parquet

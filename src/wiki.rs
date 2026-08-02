@@ -18,6 +18,7 @@ pub const WIKITEXT_DATASET_NAME: &str = "Salesforce/wikitext";
 pub const WIKITEXT_DATASET_CONFIG: &str = "wikitext-2-raw-v1";
 pub const WIKITEXT_SPLIT: &str = "train";
 const HUGGING_FACE_DATASETS_URL: &str = "https://huggingface.co/datasets";
+const WIKI_RESET_SEQUENCE_SEED: u64 = 0x5EED_5EED_5EED_5EED;
 
 pub type WikiResult<T> = Result<T, Box<dyn Error>>;
 
@@ -104,7 +105,7 @@ impl WikiAutomaton {
         genetic_code: GeneticCode,
         environment: &WikiEnvironment,
         state_bits: u8,
-        rng: &mut Xoshiro256PlusPlus,
+        _rng: &mut Xoshiro256PlusPlus,
     ) -> Self {
         debug_assert!(!environment.texts().is_empty());
         Self {
@@ -121,7 +122,9 @@ impl WikiAutomaton {
             last_action: -1,
             genetic_code,
             fingerprint: None,
-            rng: Xoshiro256PlusPlus::seed_from_u64(rng.next_u64()),
+            // Keep reset targets random over time, but identical at each reset
+            // step for all automata so fitness is comparable.
+            rng: Xoshiro256PlusPlus::seed_from_u64(WIKI_RESET_SEQUENCE_SEED),
         }
     }
 
@@ -721,5 +724,34 @@ mod tests {
             .automata
             .iter()
             .all(|automaton| automaton.fingerprint.is_some()));
+    }
+
+    #[test]
+    fn reset_uses_the_same_text_sequence_for_all_automata() {
+        let environment = WikiEnvironment::new(
+            "test",
+            vec![b"aaa".to_vec(), b"bbb".to_vec(), b"ccc".to_vec()],
+        )
+        .unwrap();
+        let mut first = WikiAutomaton::with_code(
+            GeneticCode::new(&GeneticCodeConfig::default(), 16, 24, 7).unwrap(),
+            &environment,
+            8,
+            1,
+        )
+        .unwrap();
+        let mut second = WikiAutomaton::with_code(
+            GeneticCode::new(&GeneticCodeConfig::default(), 16, 24, 8).unwrap(),
+            &environment,
+            8,
+            2,
+        )
+        .unwrap();
+
+        for _ in 0..8 {
+            first.reset(&environment);
+            second.reset(&environment);
+            assert_eq!(first.text_index, second.text_index);
+        }
     }
 }

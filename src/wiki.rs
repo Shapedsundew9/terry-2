@@ -43,6 +43,7 @@ pub struct WikiAutomaton {
     pub state_bits: u8,
     state_mask: u64,
     pub right: u64,
+    pub total_sbp: f64,
     pub total: u64,
     pub fitness: f64,
     pub last_action: i32,
@@ -121,6 +122,7 @@ impl WikiAutomaton {
             state_bits,
             state_mask: (1u64 << state_bits) - 1,
             right: 0,
+            total_sbp: 0.0,
             total: 0,
             fitness: 0.0,
             last_action: -1,
@@ -134,6 +136,7 @@ impl WikiAutomaton {
 
     pub fn tick(&mut self, environment: &WikiEnvironment) -> u8 {
         if self.remaining_bytes == 0 {
+            // If the automaton has finished the current text, move to the next text in the environment.
             self.text_index = (self.text_index + 1) % environment.texts().len();
             self.byte_index = 0;
             self.remaining_bytes = environment.texts()[self.text_index].len();
@@ -141,22 +144,70 @@ impl WikiAutomaton {
 
         let observation = environment.observation(self.text_index, self.byte_index);
         let input_code = (self.internal_state << environment.observation_bits()) | observation;
-        let output_code = self.genetic_code.get(input_code);
+
+        // The `v_pos` vector is used to store the number of votes for each positive (1) output bit.
+        let mut v_pos: Vec<usize> = vec![0; self.genetic_code.resp_bits() as usize];
+
+        // Get the output code from the genetic code, along with the votes for each positive output bit.
+        let output_code = self.genetic_code.get_with_votes(input_code, &mut v_pos);
         self.internal_state = output_code & self.state_mask;
         let prediction = (output_code >> self.state_bits) as u8;
 
+        // Keep track of where we are in the text and how many bytes are left to process.
         self.total += 1;
         self.remaining_bytes -= 1;
         self.byte_index += 1;
+
+        // Compare the prediction to the actual byte in the text (or 0 if we've reached the end)
         let actual = if self.remaining_bytes == 0 {
             0
         } else {
             environment.texts()[self.text_index][self.byte_index]
         };
+
+        // Accuracy is how many predictions were correct divided by the total number of
+        // predictions made (the length of the text).
         if prediction == actual {
             self.right += 1;
         }
-        self.fitness = self.right as f64 / self.total as f64;
+
+        // Calculate the bit level logits from the votes for each positive output bit.
+        // The net vote z_k represents the margin of victory for bit 1 over bit 0 at
+        // position k. v_k is the number of votes for a 1, p_k is the probability of
+        // a 1 at position k, y_k is the ground truth state and n is the total number
+        // of clauses. bpb is the bits per byte, which is the negative log probability
+        // of the actual byte given the predicted probabilities (the sum of the binary
+        // cross-entropy for each bit).
+        let n = self.genetic_code.num_clauses();
+        let mut bpb: f64 = 0.0;
+        for k in 0..8 {
+            let v_k = v_pos[k];
+            // The logit is the log-odds of the probability of bit 1 being correct.
+            // We can use the logit to calculate the probability of bit 1 being correct
+            // using Laplace-Smoothed Probabilities (Frequency Scaling) with a = 1
+            let p_k = (v_k + 1) as f64 / (n + 2) as f64;
+            let y_k = (actual >> k) & 1;
+            bpb += if y_k == 1 {
+                p_k.log2()
+            } else {
+                (1.0 - p_k).log2()
+            };
+        }
+
+        // Single byte perplexity, sbp, is the exponentiation of the bits per byte,
+        // which gives us a measure of how well the model predicts the next byte in the sequence.
+        // Min = 0 (Perfect prediction), Max = 256 (Worst prediction)
+        let sbp = 2f64.powf(bpb);
+        self.total_sbp += sbp;
+
+        // Dataset byte perplexity, dbp, is the average sbp over all predictions made so far.
+        // Min = 0 (Perfect prediction), Max = 256 (Worst prediction)
+        let dbp = self.total_sbp / self.total as f64;
+
+        // Fitness is the inverse of the dataset byte perplexity, which gives us a measure
+        // of how well the model predicts the next byte in the sequence. Min = 0 (Worst prediction),
+        // Max = 1 (Perfect prediction)
+        self.fitness = 1.0 - dbp / 256.0;
         prediction
     }
 
@@ -737,7 +788,10 @@ mod tests {
         assert_eq!(predictions, vec![b'b', b'c', 0]);
         assert_eq!(automaton.right, 3);
         assert_eq!(automaton.total, 3);
-        assert_eq!(automaton.fitness, 1.0);
+        // With dict-backed code `num_clauses == 0`, Laplace smoothing yields p=0.5
+        // per bit, so perfect next-byte predictions asymptotically reach 1 - 1/65536.
+        let expected_fitness = 1.0 - (1.0 / 65_536.0);
+        assert!((automaton.fitness - expected_fitness).abs() < 1e-12);
     }
 
     #[test]

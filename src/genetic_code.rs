@@ -8,7 +8,7 @@
 /// hierarchy, keeping the same crossover algorithm and checkpoint semantics.
 use rand::{RngCore, SeedableRng};
 use rand_xoshiro::Xoshiro256PlusPlus;
-use std::collections::HashMap;
+use std::{collections::HashMap, u8};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GeneticCodeKind {
@@ -93,6 +93,19 @@ impl GeneticCode {
         }
     }
 
+    #[inline]
+    pub fn get_with_votes(&mut self, key: u64, v_pos: &mut [usize]) -> u64 {
+        match self {
+            Self::Dict(code) => {
+                code.get(u32::try_from(key).expect("Dict key is outside u32")) as u64
+            }
+            Self::List(code) => {
+                code.get(u32::try_from(key).expect("List key is outside u32")) as u64
+            }
+            Self::Tsetlin(code) => code.evaluate_with_votes(key, v_pos),
+        }
+    }
+
     pub fn crossover(
         &self,
         other: &Self,
@@ -160,6 +173,13 @@ impl GeneticCode {
         match self {
             Self::Tsetlin(code) => Some(code),
             _ => None,
+        }
+    }
+
+    pub fn num_clauses(&self) -> usize {
+        match self {
+            Self::Tsetlin(code) => code.num_clauses(),
+            _ => 0,
         }
     }
 }
@@ -432,16 +452,9 @@ impl GeneticCodeTsetlin {
     /// `votes_out`.
     ///
     /// `votes_out` must have length at least `self.output_bits()`.
-    pub fn evaluate_with_votes(&self, key: u64, votes_out: &mut [usize]) -> Result<u64, String> {
-        let output_bits = self.output_bits as usize;
-        if votes_out.len() < output_bits {
-            return Err(format!(
-                "votes_out must have at least {output_bits} entries"
-            ));
-        }
-
+    pub fn evaluate_with_votes(&self, key: u64, v_pos: &mut [usize]) -> u64 {
         let mut output = 0u64;
-        for response_bit in 0..output_bits {
+        for response_bit in 0..self.output_bits as usize {
             let start = response_bit * self.num_clauses;
             let end = start + self.num_clauses;
             let mut votes = 0usize;
@@ -450,12 +463,12 @@ impl GeneticCodeTsetlin {
                     votes += 1;
                 }
             }
-            votes_out[response_bit] = votes;
+            v_pos[response_bit] = votes;
             if votes >= self.threshold {
                 output |= 1u64 << response_bit;
             }
         }
-        Ok(output)
+        output
     }
 
     pub fn crossover_with_rng(
@@ -735,7 +748,7 @@ mod tests {
         .unwrap();
         let mut votes = vec![0usize; 2];
 
-        let output = code.evaluate_with_votes(0b0010, &mut votes).unwrap();
+        let output = code.evaluate_with_votes(0b0010, &mut votes);
 
         assert_eq!(output, 0b10);
         assert_eq!(votes, vec![0, 2]);

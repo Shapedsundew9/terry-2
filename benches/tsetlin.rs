@@ -4,7 +4,7 @@ use rand_xoshiro::Xoshiro256PlusPlus;
 use rust_2::genetic_code::GeneticCodeTsetlin;
 
 fn benchmark_tsetlin(c: &mut Criterion) {
-    let code = GeneticCodeTsetlin::new(6, 4, 13, 42).unwrap();
+    let mut code = GeneticCodeTsetlin::new(6, 4, 13, 42).unwrap();
     c.bench_function("tsetlin_lookup_6x4", |b| {
         let mut input = 0u64;
         b.iter(|| {
@@ -18,13 +18,13 @@ fn benchmark_tsetlin(c: &mut Criterion) {
         let mut rng = Xoshiro256PlusPlus::seed_from_u64(44);
         b.iter(|| {
             black_box(
-                code.crossover_with_rng(&other, black_box(0.01), &mut rng)
+                code.crossover_with_rng(&other, black_box(7), &mut rng)
                     .unwrap(),
             )
         });
     });
 
-    let wiki_code = GeneticCodeTsetlin::new(16, 16, 24, 45).unwrap();
+    let mut wiki_code = GeneticCodeTsetlin::new(16, 16, 24, 45).unwrap();
     c.bench_function("tsetlin_lookup_16x16_wiki", |b| {
         let mut input = 0u64;
         b.iter(|| {
@@ -39,7 +39,7 @@ fn benchmark_tsetlin(c: &mut Criterion) {
         b.iter(|| {
             black_box(
                 wiki_code
-                    .crossover_with_rng(&wiki_other, black_box(0.01), &mut rng)
+                    .crossover_with_rng(&wiki_other, black_box(7), &mut rng)
                     .unwrap(),
             )
         });

@@ -314,6 +314,9 @@ impl GeneticCodeTsetlin {
         let len = output_bits as usize * num_clauses;
         let mut w_pos = vec![0u64; len];
         let mut w_neg = vec![0u64; len];
+
+        // Fast uniform random number generator for cold-start clause masks.
+        // Cryptographically weak (which is not an issue for this) but deterministic and reproducible.
         let mut rng = Xoshiro256PlusPlus::seed_from_u64(seed);
 
         // Match Python's 5% active-literal distribution: 95% ignored,
@@ -423,6 +426,36 @@ impl GeneticCodeTsetlin {
             }
         }
         output
+    }
+
+    /// Evaluate `key` and write per-output-bit positive vote counts into
+    /// `votes_out`.
+    ///
+    /// `votes_out` must have length at least `self.output_bits()`.
+    pub fn evaluate_with_votes(&self, key: u64, votes_out: &mut [usize]) -> Result<u64, String> {
+        let output_bits = self.output_bits as usize;
+        if votes_out.len() < output_bits {
+            return Err(format!(
+                "votes_out must have at least {output_bits} entries"
+            ));
+        }
+
+        let mut output = 0u64;
+        for response_bit in 0..output_bits {
+            let start = response_bit * self.num_clauses;
+            let end = start + self.num_clauses;
+            let mut votes = 0usize;
+            for index in start..end {
+                if self.w_pos[index] & key == self.w_pos[index] && self.w_neg[index] & key == 0 {
+                    votes += 1;
+                }
+            }
+            votes_out[response_bit] = votes;
+            if votes >= self.threshold {
+                output |= 1u64 << response_bit;
+            }
+        }
+        Ok(output)
     }
 
     pub fn crossover_with_rng(
@@ -687,6 +720,25 @@ mod tests {
             GeneticCodeTsetlin::from_masks(vec![0; 64], vec![0; 64], 64, 1, 24, Some(7)).unwrap();
 
         assert_eq!(code.evaluate(0), u64::MAX);
+    }
+
+    #[test]
+    fn tsetlin_evaluate_with_votes_reports_per_bit_counts() {
+        let code = GeneticCodeTsetlin::from_masks(
+            vec![0b0001, 0b0001, 0b0010, 0],
+            vec![0, 0b0010, 0, 0b0001],
+            2,
+            2,
+            4,
+            Some(7),
+        )
+        .unwrap();
+        let mut votes = vec![0usize; 2];
+
+        let output = code.evaluate_with_votes(0b0010, &mut votes).unwrap();
+
+        assert_eq!(output, 0b10);
+        assert_eq!(votes, vec![0, 2]);
     }
 
     #[test]

@@ -149,6 +149,36 @@ loadable. A custom-width checkpoint must be resumed with the same
 compatibility is retained for the default widths, but custom-width Python
 parity is outside the current scope.
 
+## View Predictions From A Checkpoint
+
+Use `wiki-predict-viewer` to inspect what the best checkpointed automaton is
+predicting against one WikiText entry:
+
+```bash
+cargo run --release --bin wiki_predict_viewer --
+```
+
+Defaults:
+
+- Loads the latest discovered checkpoint under `runs` (`pop_*/gen_*.toml`).
+- Selects the best automaton by checkpoint fitness.
+- Uses WikiText text index `0`.
+- Starts preview from a fresh internal state.
+- Prints aligned `Actual` and `Pred` lines, capped to `20` lines.
+
+Override the checkpoint, index, and output window:
+
+```bash
+cargo run --release --bin wiki_predict_viewer -- \
+  --checkpoint runs/RUN_ID/pop_0/gen_000040 \
+  --text-index 7 \
+  --lines 50
+```
+
+You can also override dataset resolution options (`--dataset-path`,
+`--cache-dir`, `--dataset-name`, `--dataset-config`, `--dataset-split`) using
+the same semantics as `wiki-runner`.
+
 ## Benchmark
 
 ```bash

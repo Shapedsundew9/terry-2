@@ -20,9 +20,8 @@ from plotly.subplots import make_subplots
 
 from arc3_agi.experiment import ExperimentStore, resolve_database_url
 
-EXPERIMENT_ID = 353  # <-- change me
-EXPERIMENT_IDS = [349, 350, 352, EXPERIMENT_ID]  # <-- change me
-
+EXPERIMENT_ID = None  # <-- change me
+EXPERIMENT_IDS = []  # <-- change me
 DATABASE_URL = os.environ.get("DATABASE_URL")
 store = ExperimentStore(DATABASE_URL)
 
@@ -37,6 +36,11 @@ display(
     ][-20:]
 )
 
+if EXPERIMENT_ID is None:
+    EXPERIMENT_ID = experiments["id"].iloc[-1]  # <-- change me
+if not EXPERIMENT_IDS:
+    EXPERIMENT_IDS = experiments["id"].iloc[-4:].tolist()  # <-- change me
+
 # %% [markdown]
 # ## Single-experiment analysis
 #
@@ -44,7 +48,7 @@ display(
 
 # %%
 df = store.load_stats(EXPERIMENT_ID)
-exp_name = experiments.loc[experiments["id"] == EXPERIMENT_ID, "name"].iat[0]
+exp_name = experiments.loc[experiments["id"] == EXPERIMENT_ID, "name"].iat[0]  # type: ignore
 
 print(
     f"Experiment '{exp_name}'  |  {df['pop_id'].nunique()} populations  |  {df['generation'].max()} generations"

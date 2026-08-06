@@ -26,6 +26,7 @@ pub struct WikiEnvironment {
     pub name: String,
     texts: Vec<Vec<u8>>,
     observation_bytes: u8,
+    byte_entropy: f64,
 }
 
 #[derive(Clone, Debug)]
@@ -51,6 +52,8 @@ pub struct WikiAutomaton {
     pub fingerprint: Option<SelectionFingerprint>,
     rng: Xoshiro256PlusPlus,
     v_pos: Vec<usize>,
+    predicted_byte_counts: [u64; 256],
+    predicted_count_log_sum: f64,
 }
 
 pub type WikiPopulation = PopulationCore<WikiAutomaton>;
@@ -133,6 +136,8 @@ impl WikiAutomaton {
             // stream for reset start positions.
             rng: rng.clone(),
             v_pos: vec![0; state_bits as usize + Self::RESPONSE_BITS as usize],
+            predicted_byte_counts: [0; 256],
+            predicted_count_log_sum: 0.0,
         }
     }
 
@@ -153,6 +158,7 @@ impl WikiAutomaton {
             .get_with_votes(input_code, &mut self.v_pos);
         self.internal_state = output_code & self.state_mask;
         let prediction = (output_code >> self.state_bits) as u8;
+        self.record_prediction(prediction);
 
         // Keep track of where we are in the text and how many bytes are left to process.
         self.total += 1;
@@ -201,8 +207,22 @@ impl WikiAutomaton {
         // Fitness is the inverse of the dataset byte perplexity, which gives us a measure
         // of how well the model predicts the next byte in the sequence. Min = 0 (Worst prediction),
         // Max = 1 (Perfect prediction)
-        self.fitness = 1.0 / dbp; //* self.right as f64 / self.total as f64;
+        let output_entropy = self.prediction_entropy();
+        let entropy_penalty = entropy_shortfall_penalty(environment.byte_entropy(), output_entropy);
+        self.fitness = (1.0 / (dbp * dbp)) * 2f64.powf(-entropy_penalty); // * self.right as f64 / self.total as f64;
         prediction
+    }
+
+    fn record_prediction(&mut self, prediction: u8) {
+        let index = prediction as usize;
+        let prior_count = self.predicted_byte_counts[index];
+        let next_count = prior_count + 1;
+        self.predicted_byte_counts[index] = next_count;
+        self.predicted_count_log_sum += count_log_term(next_count) - count_log_term(prior_count);
+    }
+
+    fn prediction_entropy(&self) -> f64 {
+        empirical_entropy(self.total, self.predicted_count_log_sum)
     }
 
     pub fn reset(&mut self, environment: &WikiEnvironment) {
@@ -215,6 +235,8 @@ impl WikiAutomaton {
         self.total = 0;
         self.fitness = 0.0;
         self.last_action = -1;
+        self.predicted_byte_counts = [0; 256];
+        self.predicted_count_log_sum = 0.0;
     }
 
     pub fn is_active(&self) -> bool {
@@ -265,6 +287,28 @@ fn validate_dimensions(state_bits: u8, observation_bits: u8) -> Result<(), Strin
         return Err("WikiAutomaton state_bits + observation bits must be less than 64".into());
     }
     Ok(())
+}
+
+fn count_log_term(count: u64) -> f64 {
+    if count == 0 {
+        0.0
+    } else {
+        let count = count as f64;
+        count * count.log2()
+    }
+}
+
+fn empirical_entropy(total: u64, count_log_sum: f64) -> f64 {
+    if total == 0 {
+        0.0
+    } else {
+        let total = total as f64;
+        total.log2() - (count_log_sum / total)
+    }
+}
+
+fn entropy_shortfall_penalty(target_entropy: f64, observed_entropy: f64) -> f64 {
+    (target_entropy - observed_entropy).max(0.0)
 }
 
 impl PopulationAutomaton for WikiAutomaton {
@@ -347,10 +391,12 @@ impl WikiEnvironment {
         if texts.is_empty() {
             return Err("Wiki environment must contain at least one non-empty text".into());
         }
+        let byte_entropy = dataset_byte_entropy(&texts);
         Ok(Self {
             name: name.into(),
             texts,
             observation_bytes,
+            byte_entropy,
         })
     }
 
@@ -406,6 +452,10 @@ impl WikiEnvironment {
         self.observation_bytes * 8
     }
 
+    pub fn byte_entropy(&self) -> f64 {
+        self.byte_entropy
+    }
+
     pub fn observation(&self, text_index: usize, byte_index: usize) -> u64 {
         let text = &self.texts[text_index];
         let start = (byte_index + 1).saturating_sub(self.observation_bytes as usize);
@@ -413,6 +463,19 @@ impl WikiEnvironment {
             .iter()
             .fold(0u64, |observation, byte| (observation << 8) | *byte as u64)
     }
+}
+
+fn dataset_byte_entropy(texts: &[Vec<u8>]) -> f64 {
+    let mut byte_counts = [0u64; 256];
+    let mut total = 0u64;
+    for text in texts {
+        for &byte in text {
+            byte_counts[byte as usize] += 1;
+            total += 1;
+        }
+    }
+    let count_log_sum = byte_counts.into_iter().map(count_log_term).sum();
+    empirical_entropy(total, count_log_sum)
 }
 
 pub fn load_wikitext_environment(
@@ -773,6 +836,20 @@ mod tests {
         assert_eq!(environment.observation(0, 0), 0x61);
         assert_eq!(environment.observation(0, 2), 0x616263);
         assert_eq!(environment.observation(0, 4), 0x62636465);
+    }
+
+    #[test]
+    fn dataset_byte_entropy_matches_empirical_distribution() {
+        let environment = WikiEnvironment::new("test", vec![b"aabb".to_vec()]).unwrap();
+
+        assert!((environment.byte_entropy() - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn entropy_shortfall_penalty_only_applies_below_dataset_entropy() {
+        assert!((entropy_shortfall_penalty(4.0, 2.5) - 1.5).abs() < 1e-12);
+        assert_eq!(entropy_shortfall_penalty(4.0, 4.0), 0.0);
+        assert_eq!(entropy_shortfall_penalty(4.0, 5.0), 0.0);
     }
 
     #[test]

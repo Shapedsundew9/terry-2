@@ -201,7 +201,7 @@ impl WikiAutomaton {
         // Fitness is the inverse of the dataset byte perplexity, which gives us a measure
         // of how well the model predicts the next byte in the sequence. Min = 0 (Worst prediction),
         // Max = 1 (Perfect prediction)
-        self.fitness = 1.0 / dbp;
+        self.fitness = 1.0 / dbp * self.right as f64 / self.total as f64;
         prediction
     }
 

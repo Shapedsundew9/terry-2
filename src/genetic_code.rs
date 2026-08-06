@@ -497,15 +497,18 @@ impl GeneticCodeTsetlin {
             let self_start = response_bit * self.num_clauses;
             let other_start = response_bit * other.num_clauses;
             for clause_index in 0..self.num_clauses {
-                if (rng.next_u32() & 1) == 0 {
-                    let source_index = self_start + clause_index;
-                    child_w_pos.push(self.w_pos[source_index]);
-                    child_w_neg.push(self.w_neg[source_index]);
-                } else {
-                    let source_index = other_start + clause_index;
-                    child_w_pos.push(other.w_pos[source_index]);
-                    child_w_neg.push(other.w_neg[source_index]);
-                }
+                let mask = rng.next_u64();
+                let inv_mask = !mask;
+                let source_index = self_start + clause_index;
+                let other_source_index = other_start + clause_index;
+                child_w_pos.push(
+                    (self.w_pos[source_index] & mask)
+                        | (other.w_pos[other_source_index] & inv_mask),
+                );
+                child_w_neg.push(
+                    (self.w_neg[source_index] & mask)
+                        | (other.w_neg[other_source_index] & inv_mask),
+                );
             }
         }
 

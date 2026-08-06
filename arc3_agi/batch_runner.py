@@ -333,6 +333,12 @@ def run_tracked_experiment(
 
         with store_factory(database_url) as store:
             row_count = store.ingest_run(experiment_id, run_dir)
+            diagnostics_count = 0
+            if hasattr(store, "ingest_checkpoint_diagnostics"):
+                diagnostics_count = store.ingest_checkpoint_diagnostics(
+                    experiment_id,
+                    run_dir,
+                )
             store.mark_experiment_completed(experiment_id)
     except BaseException as exc:
         if experiment_id is not None:
@@ -350,7 +356,8 @@ def run_tracked_experiment(
 
     print(
         f"\nExperiment '{name}' saved → id={experiment_id}  "
-        f"({row_count} generation-stat rows across {len(snapshots)} populations)"
+        f"({row_count} generation-stat rows, {diagnostics_count} checkpoint diagnostics "
+        f"across {len(snapshots)} populations)"
         "\n  DB: PostgreSQL"
     )
     return experiment_id

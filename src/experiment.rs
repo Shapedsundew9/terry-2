@@ -5,13 +5,17 @@
 /// `ingest_run` logic that reads `pop_*/fitness_history.json` files and
 /// bulk-upserts into `generation_stats`.
 use std::path::Path;
+use std::{collections::HashMap, fs::File, io::BufReader};
 
 use chrono::Utc;
+use ndarray::Array2;
+use ndarray_npy::NpzReader;
 use postgres::binary_copy::BinaryCopyInWriter;
 use postgres::types::Type;
 use postgres::{Client, NoTls};
 use rand::RngCore;
 use serde_json::Value;
+use toml::Value as TomlValue;
 
 // Identical to Python's _SCHEMA_SQL (idempotent — safe to run on every start).
 const SCHEMA_SQL: &str = "
@@ -58,7 +62,61 @@ CREATE TABLE IF NOT EXISTS generation_stats (
     PRIMARY KEY (experiment_id, pop_id, generation),
     FOREIGN KEY (experiment_id) REFERENCES experiments(id) ON DELETE CASCADE
 );
+
+CREATE TABLE IF NOT EXISTS checkpoint_diagnostics (
+    experiment_id                   BIGINT  NOT NULL,
+    pop_id                          INTEGER NOT NULL,
+    generation                      INTEGER NOT NULL,
+    num_automata                    INTEGER NOT NULL,
+    state_bits                      INTEGER NOT NULL,
+    input_bits                      INTEGER NOT NULL,
+    output_bits                     INTEGER NOT NULL,
+    num_clauses                     INTEGER NOT NULL,
+    clause_density_mean             REAL    NOT NULL,
+    clause_density_std              REAL    NOT NULL,
+    zero_literal_clause_rate        REAL    NOT NULL,
+    polarity_abs_mean               REAL    NOT NULL,
+    state_row_density_mean          REAL    NOT NULL,
+    response_row_density_mean       REAL    NOT NULL,
+    state_response_density_gap      REAL    NOT NULL,
+    literal_state_entropy_mean      REAL    NOT NULL,
+    literal_state_entropy_std       REAL    NOT NULL,
+    clause_churn_rate               REAL,
+    PRIMARY KEY (experiment_id, pop_id, generation),
+    FOREIGN KEY (experiment_id) REFERENCES experiments(id) ON DELETE CASCADE
+);
 ";
+
+const LOG2_3: f64 = 1.584962500721156;
+
+#[derive(Clone)]
+struct CheckpointMasks {
+    pos: Vec<u64>,
+    neg: Vec<u64>,
+    input_bits: usize,
+}
+
+#[derive(Clone)]
+struct CheckpointDiagnosticRow {
+    experiment_id: i64,
+    pop_id: i32,
+    generation: i32,
+    num_automata: i32,
+    state_bits: i32,
+    input_bits: i32,
+    output_bits: i32,
+    num_clauses: i32,
+    clause_density_mean: f32,
+    clause_density_std: f32,
+    zero_literal_clause_rate: f32,
+    polarity_abs_mean: f32,
+    state_row_density_mean: f32,
+    response_row_density_mean: f32,
+    state_response_density_gap: f32,
+    literal_state_entropy_mean: f32,
+    literal_state_entropy_std: f32,
+    clause_churn_rate: Option<f32>,
+}
 
 const DEFAULT_DATABASE_URL: &str = "postgresql://arc3_agi:arc3_agi@localhost:5432/arc3_agi";
 
@@ -124,9 +182,10 @@ where
         Ok(Ok(())) => {
             let mut store = ExperimentStore::connect(&database_url)?;
             let rows = store.ingest_run(experiment_id, &run_dir)?;
+            let diagnostics_rows = store.ingest_checkpoint_diagnostics(experiment_id, &run_dir)?;
             store.mark_completed(experiment_id)?;
             println!(
-                "\nExperiment '{name}' done -> id={experiment_id}  ({rows} generation-stat rows)"
+                "\nExperiment '{name}' done -> id={experiment_id}  ({rows} generation-stat rows, {diagnostics_rows} checkpoint diagnostics)"
             );
             Ok(())
         }
@@ -390,6 +449,456 @@ impl ExperimentStore {
 
         Ok(total)
     }
+
+    /// Read all `pop_*/gen_*.toml` checkpoints under `run_dir` and upsert
+    /// snapshot diagnostics into `checkpoint_diagnostics`.
+    pub fn ingest_checkpoint_diagnostics(
+        &mut self,
+        experiment_id: i64,
+        run_dir: &Path,
+    ) -> Result<usize, Box<dyn std::error::Error>> {
+        let mut checkpoints = discover_checkpoint_stems(run_dir)?;
+        checkpoints.sort_by_key(|(pop_id, generation, _)| (*pop_id, *generation));
+
+        let mut rows: Vec<CheckpointDiagnosticRow> = Vec::new();
+        let mut previous_masks_by_pop: HashMap<i32, CheckpointMasks> = HashMap::new();
+
+        for (pop_id, generation_hint, stem) in checkpoints {
+            let checkpoint = parse_wiki_tsetlin_checkpoint(&stem)?;
+            let Some(checkpoint) = checkpoint else {
+                continue;
+            };
+
+            let generation = if checkpoint.generation >= 0 {
+                checkpoint.generation
+            } else {
+                generation_hint
+            };
+            let mut row =
+                compute_checkpoint_metrics(experiment_id, pop_id, generation, &checkpoint);
+
+            if let Some(previous) = previous_masks_by_pop.get(&pop_id) {
+                row.clause_churn_rate = compute_clause_churn_rate(previous, &checkpoint.masks);
+            }
+            previous_masks_by_pop.insert(pop_id, checkpoint.masks.clone());
+            rows.push(row);
+        }
+
+        let total = rows.len();
+        if rows.is_empty() {
+            return Ok(0);
+        }
+
+        let mut transaction = self.client.transaction()?;
+        for row in &rows {
+            transaction.execute(
+                "INSERT INTO checkpoint_diagnostics
+                    (experiment_id, pop_id, generation,
+                     num_automata, state_bits, input_bits, output_bits, num_clauses,
+                     clause_density_mean, clause_density_std,
+                     zero_literal_clause_rate, polarity_abs_mean,
+                     state_row_density_mean, response_row_density_mean,
+                     state_response_density_gap,
+                     literal_state_entropy_mean, literal_state_entropy_std,
+                     clause_churn_rate)
+                 VALUES
+                    ($1, $2, $3,
+                     $4, $5, $6, $7, $8,
+                     $9, $10,
+                     $11, $12,
+                     $13, $14,
+                     $15,
+                     $16, $17,
+                     $18)
+                 ON CONFLICT (experiment_id, pop_id, generation)
+                 DO UPDATE SET
+                    num_automata = EXCLUDED.num_automata,
+                    state_bits = EXCLUDED.state_bits,
+                    input_bits = EXCLUDED.input_bits,
+                    output_bits = EXCLUDED.output_bits,
+                    num_clauses = EXCLUDED.num_clauses,
+                    clause_density_mean = EXCLUDED.clause_density_mean,
+                    clause_density_std = EXCLUDED.clause_density_std,
+                    zero_literal_clause_rate = EXCLUDED.zero_literal_clause_rate,
+                    polarity_abs_mean = EXCLUDED.polarity_abs_mean,
+                    state_row_density_mean = EXCLUDED.state_row_density_mean,
+                    response_row_density_mean = EXCLUDED.response_row_density_mean,
+                    state_response_density_gap = EXCLUDED.state_response_density_gap,
+                    literal_state_entropy_mean = EXCLUDED.literal_state_entropy_mean,
+                    literal_state_entropy_std = EXCLUDED.literal_state_entropy_std,
+                    clause_churn_rate = EXCLUDED.clause_churn_rate",
+                &[
+                    &row.experiment_id,
+                    &row.pop_id,
+                    &row.generation,
+                    &row.num_automata,
+                    &row.state_bits,
+                    &row.input_bits,
+                    &row.output_bits,
+                    &row.num_clauses,
+                    &row.clause_density_mean,
+                    &row.clause_density_std,
+                    &row.zero_literal_clause_rate,
+                    &row.polarity_abs_mean,
+                    &row.state_row_density_mean,
+                    &row.response_row_density_mean,
+                    &row.state_response_density_gap,
+                    &row.literal_state_entropy_mean,
+                    &row.literal_state_entropy_std,
+                    &row.clause_churn_rate,
+                ],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(total)
+    }
+}
+
+struct ParsedCheckpoint {
+    generation: i32,
+    state_bits: usize,
+    input_bits: usize,
+    output_bits: usize,
+    num_clauses: usize,
+    num_automata: usize,
+    masks: CheckpointMasks,
+}
+
+fn discover_checkpoint_stems(
+    run_dir: &Path,
+) -> Result<Vec<(i32, i32, std::path::PathBuf)>, Box<dyn std::error::Error>> {
+    let mut stems = Vec::new();
+    for entry in std::fs::read_dir(run_dir)? {
+        let pop_entry = entry?;
+        let file_name = pop_entry.file_name();
+        let file_name = file_name.to_string_lossy();
+        if !file_name.starts_with("pop_") {
+            continue;
+        }
+        let Ok(pop_id) = file_name[4..].parse::<i32>() else {
+            continue;
+        };
+        let pop_dir = pop_entry.path();
+        if !pop_dir.is_dir() {
+            continue;
+        }
+        for checkpoint_entry in std::fs::read_dir(&pop_dir)? {
+            let checkpoint_entry = checkpoint_entry?;
+            let checkpoint_path = checkpoint_entry.path();
+            if checkpoint_path.extension().and_then(|ext| ext.to_str()) != Some("toml") {
+                continue;
+            }
+            let stem = checkpoint_path.with_extension("");
+            if !stem.with_extension("npz").exists() {
+                continue;
+            }
+            let generation = stem
+                .file_name()
+                .and_then(|name| name.to_str())
+                .and_then(|name| name.strip_prefix("gen_"))
+                .and_then(|suffix| suffix.parse::<i32>().ok())
+                .unwrap_or(-1);
+            stems.push((pop_id, generation, stem));
+        }
+    }
+    Ok(stems)
+}
+
+fn parse_wiki_tsetlin_checkpoint(
+    stem: &Path,
+) -> Result<Option<ParsedCheckpoint>, Box<dyn std::error::Error>> {
+    let doc: TomlValue = toml::from_str(&std::fs::read_to_string(stem.with_extension("toml"))?)?;
+    let root = doc
+        .as_table()
+        .ok_or("checkpoint root must be a TOML table")?;
+    let environment = root
+        .get("environment")
+        .and_then(TomlValue::as_table)
+        .ok_or("checkpoint missing environment")?;
+    if environment.get("class").and_then(TomlValue::as_str) != Some("ByteEnv") {
+        return Ok(None);
+    }
+
+    let automata = root
+        .get("automata")
+        .and_then(TomlValue::as_array)
+        .ok_or("checkpoint missing automata")?;
+    if automata.is_empty() {
+        return Ok(None);
+    }
+
+    let first_automaton = automata[0]
+        .as_table()
+        .ok_or("automaton entry must be a table")?;
+    let state_bits = toml_usize(first_automaton, "state_bits")?;
+    let first_genetic = first_automaton
+        .get("genetic_code")
+        .and_then(TomlValue::as_table)
+        .ok_or("automaton missing genetic_code")?;
+    if first_genetic.get("type").and_then(TomlValue::as_str) != Some("GeneticCodeTsetlin") {
+        return Ok(None);
+    }
+
+    let input_bits = toml_usize(first_genetic, "input_bits")?;
+    let output_bits = toml_usize(first_genetic, "resp_bits")?;
+    let num_clauses = toml_usize(first_genetic, "num_clauses")?;
+    let generation = root
+        .get("meta")
+        .and_then(TomlValue::as_table)
+        .and_then(|meta| meta.get("generation"))
+        .and_then(TomlValue::as_integer)
+        .and_then(|value| i32::try_from(value).ok())
+        .unwrap_or(-1);
+
+    let npz = File::open(stem.with_extension("npz"))?;
+    let mut npz = NpzReader::new(BufReader::new(npz))?;
+
+    let mut pos_masks = Vec::new();
+    let mut neg_masks = Vec::new();
+    for automaton_idx in 0..automata.len() {
+        let pos: Array2<u64> = npz.by_name(&format!("automaton_{automaton_idx}_w_pos.npy"))?;
+        let neg: Array2<u64> = npz.by_name(&format!("automaton_{automaton_idx}_w_neg.npy"))?;
+        if pos.nrows() != output_bits || pos.ncols() != num_clauses {
+            return Err(format!(
+                "checkpoint mask shape mismatch for automaton {automaton_idx}: got {}x{}, expected {}x{}",
+                pos.nrows(),
+                pos.ncols(),
+                output_bits,
+                num_clauses
+            )
+            .into());
+        }
+        if neg.nrows() != output_bits || neg.ncols() != num_clauses {
+            return Err(format!(
+                "checkpoint mask shape mismatch for automaton {automaton_idx}: got {}x{}, expected {}x{}",
+                neg.nrows(),
+                neg.ncols(),
+                output_bits,
+                num_clauses
+            )
+            .into());
+        }
+        pos_masks.extend(pos.iter().copied());
+        neg_masks.extend(neg.iter().copied());
+    }
+
+    Ok(Some(ParsedCheckpoint {
+        generation,
+        state_bits,
+        input_bits,
+        output_bits,
+        num_clauses,
+        num_automata: automata.len(),
+        masks: CheckpointMasks {
+            pos: pos_masks,
+            neg: neg_masks,
+            input_bits,
+        },
+    }))
+}
+
+fn compute_checkpoint_metrics(
+    experiment_id: i64,
+    pop_id: i32,
+    generation: i32,
+    checkpoint: &ParsedCheckpoint,
+) -> CheckpointDiagnosticRow {
+    let input_bits = checkpoint.input_bits;
+    let state_bits = checkpoint.state_bits;
+    let output_bits = checkpoint.output_bits;
+    let num_clauses = checkpoint.num_clauses;
+    let num_automata = checkpoint.num_automata;
+    let input_mask = if input_bits >= 64 {
+        u64::MAX
+    } else {
+        (1u64 << input_bits) - 1
+    };
+
+    let mut density_sum = 0.0;
+    let mut density_sq_sum = 0.0;
+    let mut density_count = 0usize;
+    let mut zero_count = 0usize;
+    let mut polarity_sum = 0.0;
+    let mut state_row_density_sum = 0.0;
+    let mut response_row_density_sum = 0.0;
+    let mut state_row_count = 0usize;
+    let mut response_row_count = 0usize;
+    let mut entropy_sum = 0.0;
+    let mut entropy_sq_sum = 0.0;
+    let mut entropy_count = 0usize;
+
+    for automaton_idx in 0..num_automata {
+        for row_idx in 0..output_bits {
+            let mut row_active_sum = 0.0;
+            let mut row_clause_count = 0usize;
+            for clause_idx in 0..num_clauses {
+                let index =
+                    ((automaton_idx * output_bits + row_idx) * num_clauses + clause_idx) as usize;
+                let pos = checkpoint.masks.pos[index] & input_mask;
+                let neg = checkpoint.masks.neg[index] & input_mask;
+                let pos_count = pos.count_ones() as f64;
+                let neg_count = neg.count_ones() as f64;
+                let active = pos_count + neg_count;
+                let density = active / input_bits as f64;
+                density_sum += density;
+                density_sq_sum += density * density;
+                density_count += 1;
+                row_active_sum += density;
+                row_clause_count += 1;
+                if active == 0.0 {
+                    zero_count += 1;
+                }
+                if active > 0.0 {
+                    polarity_sum += ((pos_count - neg_count) / active).abs();
+                }
+            }
+
+            let row_density = if row_clause_count > 0 {
+                row_active_sum / row_clause_count as f64
+            } else {
+                0.0
+            };
+            if row_idx < state_bits {
+                state_row_density_sum += row_density;
+                state_row_count += 1;
+            } else {
+                response_row_density_sum += row_density;
+                response_row_count += 1;
+            }
+
+            let row_entropy = compute_row_entropy(automaton_idx, row_idx, checkpoint, input_mask);
+            entropy_sum += row_entropy;
+            entropy_sq_sum += row_entropy * row_entropy;
+            entropy_count += 1;
+        }
+    }
+
+    let clause_density_mean = density_sum / density_count as f64;
+    let clause_density_var = (density_sq_sum / density_count as f64) - clause_density_mean.powi(2);
+    let clause_density_std = clause_density_var.max(0.0).sqrt();
+    let zero_literal_clause_rate = zero_count as f64 / density_count as f64;
+    let polarity_abs_mean = polarity_sum / density_count as f64;
+    let state_row_density_mean = if state_row_count > 0 {
+        state_row_density_sum / state_row_count as f64
+    } else {
+        0.0
+    };
+    let response_row_density_mean = if response_row_count > 0 {
+        response_row_density_sum / response_row_count as f64
+    } else {
+        0.0
+    };
+    let literal_state_entropy_mean = entropy_sum / entropy_count as f64;
+    let literal_state_entropy_var =
+        (entropy_sq_sum / entropy_count as f64) - literal_state_entropy_mean.powi(2);
+    let literal_state_entropy_std = literal_state_entropy_var.max(0.0).sqrt();
+
+    CheckpointDiagnosticRow {
+        experiment_id,
+        pop_id,
+        generation,
+        num_automata: i32::try_from(num_automata).unwrap_or(i32::MAX),
+        state_bits: i32::try_from(state_bits).unwrap_or(i32::MAX),
+        input_bits: i32::try_from(input_bits).unwrap_or(i32::MAX),
+        output_bits: i32::try_from(output_bits).unwrap_or(i32::MAX),
+        num_clauses: i32::try_from(num_clauses).unwrap_or(i32::MAX),
+        clause_density_mean: clause_density_mean as f32,
+        clause_density_std: clause_density_std as f32,
+        zero_literal_clause_rate: zero_literal_clause_rate as f32,
+        polarity_abs_mean: polarity_abs_mean as f32,
+        state_row_density_mean: state_row_density_mean as f32,
+        response_row_density_mean: response_row_density_mean as f32,
+        state_response_density_gap: (state_row_density_mean - response_row_density_mean) as f32,
+        literal_state_entropy_mean: literal_state_entropy_mean as f32,
+        literal_state_entropy_std: literal_state_entropy_std as f32,
+        clause_churn_rate: None,
+    }
+}
+
+fn compute_row_entropy(
+    automaton_idx: usize,
+    row_idx: usize,
+    checkpoint: &ParsedCheckpoint,
+    input_mask: u64,
+) -> f64 {
+    let num_clauses = checkpoint.num_clauses;
+    let input_bits = checkpoint.input_bits;
+    let mut total_entropy = 0.0;
+    for bit in 0..input_bits {
+        let mask = 1u64 << bit;
+        let mut positive = 0usize;
+        let mut negative = 0usize;
+        for clause_idx in 0..num_clauses {
+            let index = ((automaton_idx * checkpoint.output_bits + row_idx) * num_clauses
+                + clause_idx) as usize;
+            let pos = checkpoint.masks.pos[index] & input_mask;
+            let neg = checkpoint.masks.neg[index] & input_mask;
+            if (pos & mask) != 0 {
+                positive += 1;
+            }
+            if (neg & mask) != 0 {
+                negative += 1;
+            }
+        }
+        let ignore = num_clauses.saturating_sub(positive + negative);
+        total_entropy += normalized_literal_entropy(ignore, positive, negative, num_clauses);
+    }
+    total_entropy / input_bits as f64
+}
+
+fn normalized_literal_entropy(
+    ignore: usize,
+    positive: usize,
+    negative: usize,
+    total: usize,
+) -> f64 {
+    let as_prob = |value: usize| -> f64 { value as f64 / total as f64 };
+    let mut entropy = 0.0;
+    for probability in [as_prob(ignore), as_prob(positive), as_prob(negative)] {
+        if probability > 0.0 {
+            entropy -= probability * probability.log2();
+        }
+    }
+    entropy / LOG2_3
+}
+
+fn compute_clause_churn_rate(previous: &CheckpointMasks, current: &CheckpointMasks) -> Option<f32> {
+    if previous.pos.len() != current.pos.len() || previous.neg.len() != current.neg.len() {
+        return None;
+    }
+    if previous.input_bits != current.input_bits {
+        return None;
+    }
+    let input_bits = current.input_bits;
+    let input_mask = if input_bits >= 64 {
+        u64::MAX
+    } else {
+        (1u64 << input_bits) - 1
+    };
+
+    let mut changed_literals = 0usize;
+    for ((prev_pos, prev_neg), (cur_pos, cur_neg)) in previous
+        .pos
+        .iter()
+        .zip(previous.neg.iter())
+        .zip(current.pos.iter().zip(current.neg.iter()))
+    {
+        let changed = ((*prev_pos ^ *cur_pos) | (*prev_neg ^ *cur_neg)) & input_mask;
+        changed_literals += changed.count_ones() as usize;
+    }
+    let total_literals = current.pos.len() * input_bits;
+    if total_literals == 0 {
+        return None;
+    }
+    Some((changed_literals as f64 / total_literals as f64) as f32)
+}
+
+fn toml_usize(table: &toml::Table, key: &str) -> Result<usize, Box<dyn std::error::Error>> {
+    let value = table
+        .get(key)
+        .and_then(TomlValue::as_integer)
+        .ok_or_else(|| format!("{key} must be an integer"))?;
+    Ok(usize::try_from(value).map_err(|_| format!("{key} must be nonnegative"))?)
 }
 
 #[cfg(test)]

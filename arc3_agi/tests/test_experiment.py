@@ -8,6 +8,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pytest
 
 from arc3_agi import maze_runner
@@ -166,6 +167,80 @@ def test_ingest_run_upserts_generation_stats(
             store.delete_experiment(experiment_id)
 
 
+def test_ingest_checkpoint_diagnostics_upserts(
+    tmp_path: Path,
+    database_url: str,
+) -> None:
+    name = _unique_name("diag")
+    run_dir = tmp_path / "run-diag"
+    pop_dir = run_dir / "pop_0"
+    pop_dir.mkdir(parents=True)
+
+    def write_checkpoint(
+        generation: int,
+        w_pos: np.ndarray,
+        w_neg: np.ndarray,
+    ) -> None:
+        stem = pop_dir / f"gen_{generation:06d}"
+        stem.with_suffix(".toml").write_text(
+            "\n".join(
+                [
+                    "[[automata]]",
+                    "state_bits = 2",
+                    "[automata.genetic_code]",
+                    'type = "GeneticCodeTsetlin"',
+                    "input_bits = 4",
+                    "resp_bits = 10",
+                    "num_clauses = 2",
+                    "",
+                    "[environment]",
+                    'class = "ByteEnv"',
+                    'name = "WikiEnv"',
+                    "",
+                    "[meta]",
+                    f"generation = {generation}",
+                ]
+            )
+        )
+        np.savez_compressed(
+            stem.with_suffix(".npz"),
+            automaton_0_w_pos=w_pos,
+            automaton_0_w_neg=w_neg,
+        )
+
+    # 10 rows (state_bits=2 + resp_bits=8), 2 clauses each, input_bits=4.
+    base_w_pos = np.zeros((10, 2), dtype=np.uint64)
+    base_w_neg = np.zeros((10, 2), dtype=np.uint64)
+    # Generation 10: sparse clauses.
+    base_w_pos[0, 0] = 0b0001
+    base_w_neg[3, 1] = 0b0010
+    write_checkpoint(10, base_w_pos, base_w_neg)
+
+    # Generation 20: mutate one literal to create measurable churn.
+    next_w_pos = base_w_pos.copy()
+    next_w_neg = base_w_neg.copy()
+    next_w_pos[0, 0] |= np.uint64(0b0100)
+    write_checkpoint(20, next_w_pos, next_w_neg)
+
+    with ExperimentStore(database_url) as store:
+        experiment_id = store.create_experiment(name=name, run_id="run-diag")
+        try:
+            assert store.ingest_checkpoint_diagnostics(experiment_id, run_dir) == 2
+            assert store.ingest_checkpoint_diagnostics(experiment_id, run_dir) == 2
+
+            diagnostics = store.load_checkpoint_diagnostics(experiment_id)
+            assert len(diagnostics) == 2
+            assert diagnostics.iloc[0]["generation"] == 10
+            assert diagnostics.iloc[1]["generation"] == 20
+            assert (
+                diagnostics.iloc[0]["clause_churn_rate"]
+                != diagnostics.iloc[0]["clause_churn_rate"]
+            )
+            assert diagnostics.iloc[1]["clause_churn_rate"] > 0.0
+        finally:
+            store.delete_experiment(experiment_id)
+
+
 def test_run_experiment_skips_completed_experiment(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -248,6 +323,14 @@ def test_run_experiment_closes_db_while_pool_runs(
             events.append("ingest")
             return 3
 
+        def ingest_checkpoint_diagnostics(
+            self,
+            _experiment_id: int,
+            _run_dir: Path,
+        ) -> int:
+            events.append("diagnostics")
+            return 2
+
         def mark_experiment_completed(self, _experiment_id: int) -> None:
             events.append("completed")
 
@@ -285,6 +368,7 @@ def test_run_experiment_closes_db_while_pool_runs(
         "run_pool",
         "open",
         "ingest",
+        "diagnostics",
         "completed",
         "close",
     ]

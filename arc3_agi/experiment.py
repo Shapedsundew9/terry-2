@@ -25,13 +25,17 @@ Typical workflow::
 from __future__ import annotations
 
 import json
+import math
 import os
+import re
 import socket
+import tomllib
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pandas as pd
 import psycopg
 from psycopg.sql import SQL
@@ -84,7 +88,222 @@ CREATE TABLE IF NOT EXISTS generation_stats (
     PRIMARY KEY (experiment_id, pop_id, generation),
     FOREIGN KEY (experiment_id) REFERENCES experiments(id) ON DELETE CASCADE
 );
+
+CREATE TABLE IF NOT EXISTS checkpoint_diagnostics (
+    experiment_id                   BIGINT  NOT NULL,
+    pop_id                          INTEGER NOT NULL,
+    generation                      INTEGER NOT NULL,
+    num_automata                    INTEGER NOT NULL,
+    state_bits                      INTEGER NOT NULL,
+    input_bits                      INTEGER NOT NULL,
+    output_bits                     INTEGER NOT NULL,
+    num_clauses                     INTEGER NOT NULL,
+    clause_density_mean             REAL    NOT NULL,
+    clause_density_std              REAL    NOT NULL,
+    zero_literal_clause_rate        REAL    NOT NULL,
+    polarity_abs_mean               REAL    NOT NULL,
+    state_row_density_mean          REAL    NOT NULL,
+    response_row_density_mean       REAL    NOT NULL,
+    state_response_density_gap      REAL    NOT NULL,
+    literal_state_entropy_mean      REAL    NOT NULL,
+    literal_state_entropy_std       REAL    NOT NULL,
+    clause_churn_rate               REAL,
+    PRIMARY KEY (experiment_id, pop_id, generation),
+    FOREIGN KEY (experiment_id) REFERENCES experiments(id) ON DELETE CASCADE
+);
 """
+
+
+_POP_DIR_PATTERN = re.compile(r"^pop_(\d+)$")
+
+
+def _bitcount_u64(values: np.ndarray) -> np.ndarray:
+    """Return bitcounts for a uint64 ndarray with the same shape."""
+    contiguous = np.ascontiguousarray(values, dtype=np.uint64)
+    byte_view = contiguous.view(np.uint8).reshape(*contiguous.shape, 8)
+    return np.unpackbits(byte_view, axis=-1).sum(axis=-1)
+
+
+def _normalized_state_entropy(
+    ignore: int, positive: int, negative: int, total: int
+) -> float:
+    probs = [ignore / total, positive / total, negative / total]
+    entropy = 0.0
+    for probability in probs:
+        if probability > 0.0:
+            entropy -= probability * math.log2(probability)
+    return entropy / math.log2(3.0)
+
+
+def _compute_row_entropy(
+    row_pos: np.ndarray,
+    row_neg: np.ndarray,
+    input_bits: int,
+    num_clauses: int,
+) -> float:
+    """Return mean literal-state entropy across input bits for one output row."""
+    total_entropy = 0.0
+    for bit in range(input_bits):
+        mask = np.uint64(1 << bit)
+        positive = int(np.count_nonzero((row_pos & mask) != 0))
+        negative = int(np.count_nonzero((row_neg & mask) != 0))
+        ignore = num_clauses - positive - negative
+        total_entropy += _normalized_state_entropy(
+            ignore, positive, negative, num_clauses
+        )
+    return total_entropy / input_bits
+
+
+def _compute_checkpoint_snapshot_metrics(
+    arrays: dict[str, np.ndarray],
+    state_bits: int,
+    input_bits: int,
+    output_bits: int,
+    num_clauses: int,
+    num_automata: int,
+) -> tuple[dict[str, float], tuple[np.ndarray, np.ndarray]]:
+    """Compute aggregate mask diagnostics and return summary plus masks.
+
+    Returned mask tuple shape is [num_automata, output_bits, num_clauses] for
+    both positive and negative literals and is used to compute checkpoint churn.
+    """
+    input_mask = (
+        np.uint64((1 << input_bits) - 1)
+        if input_bits < 64
+        else np.uint64(0xFFFFFFFFFFFFFFFF)
+    )
+    all_pos: list[np.ndarray] = []
+    all_neg: list[np.ndarray] = []
+    all_clause_density: list[np.ndarray] = []
+    all_zero_rates: list[float] = []
+    all_polarity: list[np.ndarray] = []
+    all_state_row_density: list[np.ndarray] = []
+    all_response_row_density: list[np.ndarray] = []
+    all_row_entropy: list[np.ndarray] = []
+
+    for automaton_idx in range(num_automata):
+        key_pos = f"automaton_{automaton_idx}_w_pos"
+        key_neg = f"automaton_{automaton_idx}_w_neg"
+        if key_pos not in arrays or key_neg not in arrays:
+            raise ValueError(f"Checkpoint arrays missing {key_pos}/{key_neg}.")
+
+        w_pos = np.asarray(arrays[key_pos], dtype=np.uint64)
+        w_neg = np.asarray(arrays[key_neg], dtype=np.uint64)
+        if w_pos.shape != (output_bits, num_clauses) or w_neg.shape != (
+            output_bits,
+            num_clauses,
+        ):
+            raise ValueError(
+                "Checkpoint Tsetlin mask shape mismatch for automaton "
+                f"{automaton_idx}: got {w_pos.shape}/{w_neg.shape}, expected "
+                f"({output_bits}, {num_clauses})."
+            )
+
+        w_pos = np.bitwise_and(w_pos, input_mask)
+        w_neg = np.bitwise_and(w_neg, input_mask)
+        all_pos.append(w_pos)
+        all_neg.append(w_neg)
+
+        pos_counts = _bitcount_u64(w_pos).astype(np.float64)
+        neg_counts = _bitcount_u64(w_neg).astype(np.float64)
+        active_counts = pos_counts + neg_counts
+
+        clause_density = (active_counts / float(input_bits)).reshape(-1)
+        all_clause_density.append(clause_density)
+        all_zero_rates.append(float(np.mean(active_counts == 0.0)))
+
+        polarity = np.zeros_like(active_counts, dtype=np.float64)
+        active_mask = active_counts > 0.0
+        polarity[active_mask] = np.abs(
+            (pos_counts[active_mask] - neg_counts[active_mask])
+            / active_counts[active_mask]
+        )
+        all_polarity.append(polarity.reshape(-1))
+
+        row_density = np.mean(active_counts / float(input_bits), axis=1)
+        all_state_row_density.append(row_density[:state_bits])
+        all_response_row_density.append(row_density[state_bits:output_bits])
+
+        row_entropy = np.zeros(output_bits, dtype=np.float64)
+        for row_idx in range(output_bits):
+            row_entropy[row_idx] = _compute_row_entropy(
+                w_pos[row_idx],
+                w_neg[row_idx],
+                input_bits,
+                num_clauses,
+            )
+        all_row_entropy.append(row_entropy)
+
+    density_vector = np.concatenate(all_clause_density)
+    polarity_vector = np.concatenate(all_polarity)
+    state_density_vector = np.concatenate(all_state_row_density)
+    response_density_vector = np.concatenate(all_response_row_density)
+    entropy_vector = np.concatenate(all_row_entropy)
+
+    summary = {
+        "clause_density_mean": float(np.mean(density_vector)),
+        "clause_density_std": float(np.std(density_vector)),
+        "zero_literal_clause_rate": float(np.mean(all_zero_rates)),
+        "polarity_abs_mean": float(np.mean(polarity_vector)),
+        "state_row_density_mean": float(np.mean(state_density_vector)),
+        "response_row_density_mean": float(np.mean(response_density_vector)),
+        "state_response_density_gap": float(
+            np.mean(state_density_vector) - np.mean(response_density_vector)
+        ),
+        "literal_state_entropy_mean": float(np.mean(entropy_vector)),
+        "literal_state_entropy_std": float(np.std(entropy_vector)),
+    }
+    return summary, (np.stack(all_pos, axis=0), np.stack(all_neg, axis=0))
+
+
+def _compute_clause_churn_rate(
+    prev_masks: tuple[np.ndarray, np.ndarray],
+    current_masks: tuple[np.ndarray, np.ndarray],
+    input_bits: int,
+) -> float:
+    """Return literal-change rate between two checkpoint snapshots."""
+    prev_pos, prev_neg = prev_masks
+    cur_pos, cur_neg = current_masks
+    if prev_pos.shape != cur_pos.shape or prev_neg.shape != cur_neg.shape:
+        return float("nan")
+
+    input_mask = (
+        np.uint64((1 << input_bits) - 1)
+        if input_bits < 64
+        else np.uint64(0xFFFFFFFFFFFFFFFF)
+    )
+    changed = np.bitwise_or(
+        np.bitwise_xor(prev_pos, cur_pos), np.bitwise_xor(prev_neg, cur_neg)
+    )
+    changed = np.bitwise_and(changed, input_mask)
+    changed_literals = int(_bitcount_u64(changed).sum())
+    total_literals = (
+        prev_pos.shape[0] * prev_pos.shape[1] * prev_pos.shape[2] * input_bits
+    )
+    if total_literals == 0:
+        return float("nan")
+    return changed_literals / total_literals
+
+
+def _iter_checkpoint_stems(run_dir: Path) -> list[tuple[int, int, Path]]:
+    stems: list[tuple[int, int, Path]] = []
+    for pop_dir in sorted(run_dir.glob("pop_*")):
+        match = _POP_DIR_PATTERN.match(pop_dir.name)
+        if match is None or not pop_dir.is_dir():
+            continue
+        pop_id = int(match.group(1))
+        for toml_path in sorted(pop_dir.glob("gen_*.toml")):
+            stem = toml_path.with_suffix("")
+            npz_path = stem.with_suffix(".npz")
+            if not npz_path.exists():
+                continue
+            generation_match = re.search(r"gen_(\d+)$", stem.name)
+            generation_hint = (
+                int(generation_match.group(1)) if generation_match is not None else -1
+            )
+            stems.append((pop_id, generation_hint, stem))
+    stems.sort(key=lambda item: (item[0], item[1], item[2].name))
+    return stems
 
 
 @dataclass(frozen=True)
@@ -375,6 +594,155 @@ class ExperimentStore:
             self._update_experiment_summary(experiment_id)
         return len(rows)
 
+    def ingest_checkpoint_diagnostics(
+        self, experiment_id: int, run_dir: Path | str
+    ) -> int:
+        """Ingest checkpoint-derived mask diagnostics for Wiki Tsetlin runs.
+
+        The loader scans ``pop_*/gen_*.toml`` checkpoints, reads Tsetlin masks
+        from sibling ``.npz`` files, computes aggregate clause/state diagnostics,
+        and upserts one row per ``(pop_id, generation)`` into
+        ``checkpoint_diagnostics``.
+
+        Returns
+        -------
+        int
+            Number of diagnostic rows discovered (and upsert-attempted).
+        """
+        run_dir = Path(run_dir)
+        rows: list[
+            tuple[
+                int,
+                int,
+                int,
+                int,
+                int,
+                int,
+                int,
+                int,
+                float,
+                float,
+                float,
+                float,
+                float,
+                float,
+                float,
+                float,
+                float,
+                float | None,
+            ]
+        ] = []
+        previous_masks_by_pop: dict[int, tuple[np.ndarray, np.ndarray]] = {}
+
+        for pop_id, _generation_hint, stem in _iter_checkpoint_stems(run_dir):
+            with stem.with_suffix(".toml").open("rb") as fh:
+                doc = tomllib.load(fh)
+
+            environment = doc.get("environment", {})
+            if environment.get("class") != "ByteEnv":
+                continue
+
+            automata = doc.get("automata", [])
+            if not automata:
+                continue
+
+            first_auto = automata[0]
+            genetic_code = first_auto.get("genetic_code", {})
+            if genetic_code.get("type") != "GeneticCodeTsetlin":
+                continue
+
+            state_bits = int(first_auto["state_bits"])
+            input_bits = int(genetic_code["input_bits"])
+            output_bits = int(genetic_code["resp_bits"])
+            num_clauses = int(genetic_code["num_clauses"])
+            generation = int(doc.get("meta", {}).get("generation", 0))
+            num_automata = int(len(automata))
+
+            arrays: dict[str, np.ndarray] = dict(
+                np.load(stem.with_suffix(".npz"), allow_pickle=False)
+            )
+            metrics, current_masks = _compute_checkpoint_snapshot_metrics(
+                arrays,
+                state_bits=state_bits,
+                input_bits=input_bits,
+                output_bits=output_bits,
+                num_clauses=num_clauses,
+                num_automata=num_automata,
+            )
+
+            churn_rate: float | None = None
+            previous_masks = previous_masks_by_pop.get(pop_id)
+            if previous_masks is not None:
+                churn = _compute_clause_churn_rate(
+                    previous_masks,
+                    current_masks,
+                    input_bits=input_bits,
+                )
+                if not math.isnan(churn):
+                    churn_rate = float(churn)
+            previous_masks_by_pop[pop_id] = current_masks
+
+            rows.append(
+                (
+                    experiment_id,
+                    pop_id,
+                    generation,
+                    num_automata,
+                    state_bits,
+                    input_bits,
+                    output_bits,
+                    num_clauses,
+                    metrics["clause_density_mean"],
+                    metrics["clause_density_std"],
+                    metrics["zero_literal_clause_rate"],
+                    metrics["polarity_abs_mean"],
+                    metrics["state_row_density_mean"],
+                    metrics["response_row_density_mean"],
+                    metrics["state_response_density_gap"],
+                    metrics["literal_state_entropy_mean"],
+                    metrics["literal_state_entropy_std"],
+                    churn_rate,
+                )
+            )
+
+        if rows:
+            with self._conn.transaction():
+                with self._conn.cursor() as cursor:
+                    cursor.executemany(
+                        """
+                        INSERT INTO checkpoint_diagnostics
+                            (experiment_id, pop_id, generation,
+                             num_automata, state_bits, input_bits, output_bits, num_clauses,
+                             clause_density_mean, clause_density_std,
+                             zero_literal_clause_rate, polarity_abs_mean,
+                             state_row_density_mean, response_row_density_mean,
+                             state_response_density_gap,
+                             literal_state_entropy_mean, literal_state_entropy_std,
+                             clause_churn_rate)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s,
+                                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (experiment_id, pop_id, generation) DO UPDATE SET
+                            num_automata = EXCLUDED.num_automata,
+                            state_bits = EXCLUDED.state_bits,
+                            input_bits = EXCLUDED.input_bits,
+                            output_bits = EXCLUDED.output_bits,
+                            num_clauses = EXCLUDED.num_clauses,
+                            clause_density_mean = EXCLUDED.clause_density_mean,
+                            clause_density_std = EXCLUDED.clause_density_std,
+                            zero_literal_clause_rate = EXCLUDED.zero_literal_clause_rate,
+                            polarity_abs_mean = EXCLUDED.polarity_abs_mean,
+                            state_row_density_mean = EXCLUDED.state_row_density_mean,
+                            response_row_density_mean = EXCLUDED.response_row_density_mean,
+                            state_response_density_gap = EXCLUDED.state_response_density_gap,
+                            literal_state_entropy_mean = EXCLUDED.literal_state_entropy_mean,
+                            literal_state_entropy_std = EXCLUDED.literal_state_entropy_std,
+                            clause_churn_rate = EXCLUDED.clause_churn_rate
+                        """,
+                        rows,
+                    )
+
+        return len(rows)
+
     def list_experiments(self) -> pd.DataFrame:
         """Return a DataFrame of all experiments with summary counts.
 
@@ -407,6 +775,39 @@ class ExperimentStore:
             SQL("""
             SELECT pop_id, generation, min_fitness, max_fitness, mean_fitness, duration_s
             FROM generation_stats
+            WHERE experiment_id = %s
+            ORDER BY pop_id, generation
+            """),
+            [experiment_id],
+        )
+
+    def load_checkpoint_diagnostics(self, experiment_id: int) -> pd.DataFrame:
+        """Return checkpoint diagnostics for *experiment_id*.
+
+        Columns include clause density, ambivalence/opinionatedness, row-level
+        entropy, and optional inter-checkpoint churn.
+        """
+        return self._read_dataframe(
+            SQL("""
+            SELECT
+                pop_id,
+                generation,
+                num_automata,
+                state_bits,
+                input_bits,
+                output_bits,
+                num_clauses,
+                clause_density_mean,
+                clause_density_std,
+                zero_literal_clause_rate,
+                polarity_abs_mean,
+                state_row_density_mean,
+                response_row_density_mean,
+                state_response_density_gap,
+                literal_state_entropy_mean,
+                literal_state_entropy_std,
+                clause_churn_rate
+            FROM checkpoint_diagnostics
             WHERE experiment_id = %s
             ORDER BY pop_id, generation
             """),

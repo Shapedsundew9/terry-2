@@ -209,7 +209,7 @@ impl WikiAutomaton {
         // Max = 1 (Perfect prediction)
         let output_entropy = self.prediction_entropy();
         let entropy_penalty = entropy_shortfall_penalty(environment.byte_entropy(), output_entropy);
-        self.fitness = (1.0 / (dbp * dbp)) * 2f64.powf(-entropy_penalty); // * self.right as f64 / self.total as f64;
+        self.fitness = (1.0 / dbp) * 2f64.powf(-entropy_penalty); // * self.right as f64 / self.total as f64;
         prediction
     }
 
